@@ -4,7 +4,7 @@
 
 由嘉文钱开发并开源。工程内部名称保留为 `CodexQuotaBar`，方便 SwiftPM、脚本和路径保持稳定。
 
-<img width="2500" height="3333" alt="幻灯片12" src="https://github.com/user-attachments/assets/fc4981a0-ca34-4ff2-9712-698e07bb9408" />
+<img width="2500" height="3333" alt="幻灯片12" src="https://github.com/user-attachments/assets/17b1d78e-0c44-4e8b-a82f-177e8e5ee2dd" />
 
 ## 适合用在
 
