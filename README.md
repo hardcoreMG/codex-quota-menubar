@@ -4,17 +4,7 @@
 
 由嘉文钱开发并开源。工程内部名称保留为 `CodexQuotaBar`，方便 SwiftPM、脚本和路径保持稳定。
 
-![App Icon](Assets/AppIcon-Source.png)
-
-## 重要说明
-
-这个仓库推荐以源码方式分享，不默认发布预构建的 `.app` 或 `.dmg` 安装包。
-
-原因是 macOS Gatekeeper 会拦截未经过 Apple Developer ID 签名和 notarization 公证的第三方二进制文件。别人直接下载未公证的安装包时，系统可能提示“无法打开”或识别为风险软件。
-
-推荐使用方式是：下载源码后，在自己的 Mac 上本地构建成自用 app。这样更适合开源分享，也避免把未公证二进制分发给其他人。
-
-如果你要公开发布可直接下载的 `.dmg`，需要使用 Apple Developer ID 证书签名，并提交 Apple notarization。
+<img width="2500" height="3333" alt="幻灯片12" src="https://github.com/user-attachments/assets/fc4981a0-ca34-4ff2-9712-698e07bb9408" />
 
 ## 适合用在
 
@@ -31,6 +21,14 @@
 - 每 5 分钟自动读取一次额度，打开菜单时也会读取一次，保留手动刷新。
 - 根据菜单栏明暗自动切换显示颜色，深色菜单栏下仍然可读。
 - 不直接读取 `auth.json`、cookie、浏览器 session 或账号敏感文件。
+
+## 重要说明
+
+这个仓库推荐以源码方式分享，不默认发布预构建的 `.app` 或 `.dmg` 安装包。
+
+原因是 macOS Gatekeeper 会拦截未经过 Apple Developer ID 签名和 notarization 公证的第三方二进制文件。别人直接下载未公证的安装包时，系统可能提示“无法打开”或识别为风险软件。
+
+推荐使用方式是：下载源码后，在自己的 Mac 上本地构建成自用 app。
 
 ## 环境要求
 
