@@ -30,7 +30,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let store = QuotaStore()
     private var cancellable: AnyCancellable?
-    private var appearanceObservation: NSKeyValueObservation?
+    private var lastRenderState: StatusRenderState?
 
     override init() {
         super.init()
@@ -40,16 +40,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.imageScaling = .scaleNone
-        statusItem.button?.postsFrameChangedNotifications = true
         updateStatusView()
 
         cancellable = store.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.updateStatusView()
-            }
-        }
-
-        appearanceObservation = statusItem.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.updateStatusView()
             }
@@ -79,7 +72,6 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         NotificationCenter.default.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
-        appearanceObservation?.invalidate()
     }
 
     @objc private func updateStatusViewForEnvironmentChange() {
@@ -87,20 +79,35 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func updateStatusView() {
-        let usesDarkMenuBar = statusItem.button?.usesDarkMenuBarAppearance ?? false
-        let image = QuotaStatusImageRenderer.render(
+        let renderState = StatusRenderState(
             topValue: store.snapshot.menuFiveHourValue,
             bottomValue: store.snapshot.menuWeeklyValue,
             topIsLow: shouldHighlightLowQuota(store.snapshot.fiveHourRemainingPercent),
             bottomIsLow: shouldHighlightLowQuota(store.snapshot.weeklyRemainingPercent),
-            usesDarkMenuBar: usesDarkMenuBar
+            usesDarkMenuBar: statusItem.button?.usesDarkMenuBarAppearance ?? false,
+            toolTip: store.snapshot.menuTitle
+        )
+
+        guard renderState != lastRenderState else {
+            return
+        }
+
+        let image = QuotaStatusImageRenderer.render(
+            topValue: renderState.topValue,
+            bottomValue: renderState.bottomValue,
+            topIsLow: renderState.topIsLow,
+            bottomIsLow: renderState.bottomIsLow,
+            usesDarkMenuBar: renderState.usesDarkMenuBar
         )
         statusItem.button?.image = image
-        statusItem.button?.toolTip = store.snapshot.menuTitle
+        statusItem.button?.toolTip = renderState.toolTip
         statusItem.length = image.size.width
+        lastRenderState = renderState
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        updateStatusView()
+
         Task {
             await store.refresh()
         }
@@ -169,6 +176,15 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func quit() {
         NSApp.terminate(nil)
     }
+}
+
+private struct StatusRenderState: Equatable {
+    let topValue: String
+    let bottomValue: String
+    let topIsLow: Bool
+    let bottomIsLow: Bool
+    let usesDarkMenuBar: Bool
+    let toolTip: String
 }
 
 private extension NSStatusBarButton {
