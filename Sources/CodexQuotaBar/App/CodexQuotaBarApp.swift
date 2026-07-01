@@ -189,22 +189,89 @@ private struct StatusRenderState: Equatable {
 
 private extension NSStatusBarButton {
     var usesDarkMenuBarAppearance: Bool {
-        let names: [NSAppearance.Name] = [
-            .darkAqua,
-            .aqua,
-            .vibrantDark,
-            .vibrantLight,
-            .accessibilityHighContrastDarkAqua,
-            .accessibilityHighContrastAqua
-        ]
-
-        guard let match = effectiveAppearance.bestMatch(from: names) else {
-            return UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        if let screenBasedResult = MenuBarBackgroundDetector.usesDarkMenuBar(near: self) {
+            return screenBasedResult
         }
 
-        return match == .darkAqua ||
-            match == .vibrantDark ||
-            match == .accessibilityHighContrastDarkAqua
+        return false
+    }
+}
+
+private enum MenuBarBackgroundDetector {
+    static func usesDarkMenuBar(near button: NSStatusBarButton) -> Bool? {
+        guard CGPreflightScreenCaptureAccess(),
+              let screen = button.window?.screen ?? NSScreen.main,
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return nil
+        }
+
+        let buttonRect = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? .zero
+        let localSampleXs: [CGFloat]
+        if buttonRect.isEmpty {
+            localSampleXs = [
+                screen.frame.midX - 80,
+                screen.frame.midX - 40,
+                screen.frame.midX + 40,
+                screen.frame.midX + 80
+            ]
+        } else {
+            localSampleXs = [
+                buttonRect.minX - 80,
+                buttonRect.minX - 56,
+                buttonRect.minX - 32,
+                buttonRect.maxX + 32,
+                buttonRect.maxX + 56,
+                buttonRect.maxX + 80
+            ]
+        }
+        let sampleYs = [
+            screen.frame.maxY - 4,
+            screen.frame.maxY - (NSStatusBar.system.thickness / 2)
+        ]
+
+        let luminanceValues = localSampleXs.flatMap { sampleX in
+            sampleYs.compactMap { sampleY in
+                sampleLuminance(at: NSPoint(x: sampleX, y: sampleY), screen: screen, displayID: displayID)
+            }
+        }
+
+        guard luminanceValues.count >= 2 else {
+            return nil
+        }
+
+        let sorted = luminanceValues.sorted()
+        let medianLuminance = sorted[sorted.count / 2]
+        return medianLuminance < 0.45
+    }
+
+    private static func sampleLuminance(at point: NSPoint, screen: NSScreen, displayID: CGDirectDisplayID) -> Double? {
+        let scale = screen.backingScaleFactor
+        let pixelX = (point.x - screen.frame.minX) * scale
+        let pixelY = (point.y - screen.frame.minY) * scale
+        let captureRect = CGRect(x: pixelX - 2, y: pixelY - 2, width: 4, height: 4)
+
+        guard let image = CGDisplayCreateImage(displayID, rect: captureRect) else {
+            return nil
+        }
+
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var values: [Double] = []
+
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+                    continue
+                }
+
+                values.append((0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent))
+            }
+        }
+
+        guard !values.isEmpty else {
+            return nil
+        }
+
+        return values.reduce(0, +) / Double(values.count)
     }
 }
 
@@ -417,6 +484,9 @@ private enum QuotaStatusImageRenderer {
         let path = NSBezierPath(roundedRect: badgeRect, xRadius: badgeHeight / 2, yRadius: badgeHeight / 2)
         (isLow ? lowQuotaBadgeColor : palette.badgeColor).setFill()
         path.fill()
+        (isLow ? NSColor.white.withAlphaComponent(0.35) : palette.badgeStrokeColor).setStroke()
+        path.lineWidth = 0.45
+        path.stroke()
 
         drawBadge(
             text: badge,
@@ -425,7 +495,12 @@ private enum QuotaStatusImageRenderer {
         )
 
         let valueX = horizontalPadding + badgeWidth + badgeGap
-        drawValue(text: value, in: NSRect(x: valueX, y: y, width: width - valueX, height: 9.5), color: palette.valueColor)
+        drawValue(
+            text: value,
+            in: NSRect(x: valueX, y: y, width: width - valueX, height: 9.5),
+            color: palette.valueColor,
+            strokeColor: palette.valueStrokeColor
+        )
     }
 
     private static func drawBadge(text: String, in rect: NSRect, color: NSColor) {
@@ -440,13 +515,15 @@ private enum QuotaStatusImageRenderer {
         NSString(string: text).draw(in: rect, withAttributes: attributes)
     }
 
-    private static func drawValue(text: String, in rect: NSRect, color: NSColor) {
+    private static func drawValue(text: String, in rect: NSRect, color: NSColor, strokeColor: NSColor) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .left
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: valueFont,
             .foregroundColor: color,
+            .strokeColor: strokeColor,
+            .strokeWidth: -1.8,
             .paragraphStyle: paragraph
         ]
         NSString(string: text).draw(in: rect, withAttributes: attributes)
@@ -462,17 +539,23 @@ private enum QuotaStatusImageRenderer {
     private struct Palette {
         let badgeColor: NSColor
         let badgeTextColor: NSColor
+        let badgeStrokeColor: NSColor
         let valueColor: NSColor
+        let valueStrokeColor: NSColor
 
         init(usesDarkMenuBar: Bool) {
             if usesDarkMenuBar {
                 badgeColor = .white
                 badgeTextColor = .black
+                badgeStrokeColor = NSColor.black.withAlphaComponent(0.35)
                 valueColor = .white
+                valueStrokeColor = NSColor.black.withAlphaComponent(0.8)
             } else {
-                badgeColor = .labelColor
+                badgeColor = .black
                 badgeTextColor = .white
-                valueColor = .labelColor
+                badgeStrokeColor = NSColor.white.withAlphaComponent(0.55)
+                valueColor = .black
+                valueStrokeColor = NSColor.white.withAlphaComponent(0.9)
             }
         }
     }

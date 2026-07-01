@@ -27,7 +27,7 @@ GitHub 仓库默认只发布源码，不发布预构建的 `.app` 或 `.dmg`。
 生成产物：
 
 ```text
-dist/CodexQuotaBar-0.1.1.dmg
+dist/CodexQuotaBar-0.1.2.dmg
 ```
 
 这个 DMG 默认是 ad-hoc 签名，只适合本机自用或开发测试。
