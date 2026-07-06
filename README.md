@@ -62,7 +62,7 @@ cd codex-quota-menubar
 生成文件：
 
 ```text
-dist/CodexQuotaBar-0.1.3.dmg
+dist/CodexQuotaBar-0.1.4.dmg
 ```
 
 注意：这个脚本默认使用 ad-hoc 签名，只适合本机自用或开发测试。不要把这个未公证的 DMG 当成正式安装包分发给其他人。

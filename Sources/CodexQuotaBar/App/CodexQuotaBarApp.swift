@@ -170,7 +170,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func refresh() {
         if let button = statusItem.button {
-            manuallyDetectedUsesDarkMenuBar = WallpaperMenuBarDetector.usesDarkMenuBar(near: button)
+            manuallyDetectedUsesDarkMenuBar =
+                MenuBarBackgroundDetector.usesDarkMenuBar(near: button) ??
+                WallpaperMenuBarDetector.usesDarkMenuBar(near: button)
             updateStatusView(force: true)
         }
 
@@ -250,7 +252,7 @@ private enum MenuBarBackgroundDetector {
 
         let sorted = luminanceValues.sorted()
         let medianLuminance = sorted[sorted.count / 2]
-        return medianLuminance < 0.45
+        return MenuBarContrastHeuristic.usesDarkMenuBar(luminance: medianLuminance, saturation: nil)
     }
 
     private static func sampleLuminance(at point: NSPoint, screen: NSScreen, displayID: CGDirectDisplayID) -> Double? {
@@ -284,6 +286,20 @@ private enum MenuBarBackgroundDetector {
     }
 }
 
+private enum MenuBarContrastHeuristic {
+    static func usesDarkMenuBar(luminance: Double, saturation: Double?) -> Bool {
+        if luminance < 0.62 {
+            return true
+        }
+
+        if let saturation, saturation > 0.25, luminance < 0.72 {
+            return true
+        }
+
+        return false
+    }
+}
+
 private enum WallpaperMenuBarDetector {
     static func usesDarkMenuBar(near button: NSStatusBarButton) -> Bool? {
         guard let screen = button.window?.screen ?? NSScreen.main,
@@ -295,17 +311,19 @@ private enum WallpaperMenuBarDetector {
 
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
         let samplePoints = menuBarSamplePoints(near: button, on: screen)
-        let luminanceValues = samplePoints.compactMap { point in
-            sampleLuminance(at: point, screen: screen, bitmap: bitmap)
+        let samples = samplePoints.compactMap { point in
+            sampleColor(at: point, screen: screen, bitmap: bitmap)
         }
 
-        guard luminanceValues.count >= 2 else {
+        guard samples.count >= 2 else {
             return nil
         }
 
-        let sorted = luminanceValues.sorted()
-        let medianLuminance = sorted[sorted.count / 2]
-        return medianLuminance < 0.48
+        let sortedLuminance = samples.map(\.luminance).sorted()
+        let sortedSaturation = samples.map(\.saturation).sorted()
+        let medianLuminance = sortedLuminance[sortedLuminance.count / 2]
+        let medianSaturation = sortedSaturation[sortedSaturation.count / 2]
+        return MenuBarContrastHeuristic.usesDarkMenuBar(luminance: medianLuminance, saturation: medianSaturation)
     }
 
     private static func menuBarSamplePoints(near button: NSStatusBarButton, on screen: NSScreen) -> [NSPoint] {
@@ -343,7 +361,7 @@ private enum WallpaperMenuBarDetector {
         }
     }
 
-    private static func sampleLuminance(at point: NSPoint, screen: NSScreen, bitmap: NSBitmapImageRep) -> Double? {
+    private static func sampleColor(at point: NSPoint, screen: NSScreen, bitmap: NSBitmapImageRep) -> ColorSample? {
         let imageWidth = CGFloat(bitmap.pixelsWide)
         let imageHeight = CGFloat(bitmap.pixelsHigh)
         guard imageWidth > 0, imageHeight > 0 else {
@@ -369,7 +387,16 @@ private enum WallpaperMenuBarDetector {
             return nil
         }
 
-        return (0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent)
+        let luminance = (0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent)
+        let maxComponent = max(color.redComponent, color.greenComponent, color.blueComponent)
+        let minComponent = min(color.redComponent, color.greenComponent, color.blueComponent)
+        let saturation = maxComponent > 0 ? (maxComponent - minComponent) / maxComponent : 0
+        return ColorSample(luminance: luminance, saturation: saturation)
+    }
+
+    private struct ColorSample {
+        let luminance: Double
+        let saturation: Double
     }
 }
 
