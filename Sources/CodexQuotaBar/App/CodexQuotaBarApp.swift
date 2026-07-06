@@ -31,6 +31,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     private let store = QuotaStore()
     private var cancellable: AnyCancellable?
     private var lastRenderState: StatusRenderState?
+    private var manuallyDetectedUsesDarkMenuBar: Bool?
 
     override init() {
         super.init()
@@ -78,17 +79,17 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         updateStatusView()
     }
 
-    private func updateStatusView() {
+    private func updateStatusView(force: Bool = false) {
         let renderState = StatusRenderState(
             topValue: store.snapshot.menuFiveHourValue,
             bottomValue: store.snapshot.menuWeeklyValue,
             topIsLow: shouldHighlightLowQuota(store.snapshot.fiveHourRemainingPercent),
             bottomIsLow: shouldHighlightLowQuota(store.snapshot.weeklyRemainingPercent),
-            usesDarkMenuBar: statusItem.button?.usesDarkMenuBarAppearance ?? false,
+            usesDarkMenuBar: manuallyDetectedUsesDarkMenuBar ?? statusItem.button?.usesDarkMenuBarAppearance ?? false,
             toolTip: store.snapshot.menuTitle
         )
 
-        guard renderState != lastRenderState else {
+        guard force || renderState != lastRenderState else {
             return
         }
 
@@ -168,8 +169,16 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func refresh() {
+        if let button = statusItem.button {
+            manuallyDetectedUsesDarkMenuBar = WallpaperMenuBarDetector.usesDarkMenuBar(near: button)
+            updateStatusView(force: true)
+        }
+
         Task {
             await store.refresh()
+            await MainActor.run {
+                self.updateStatusView(force: true)
+            }
         }
     }
 
@@ -272,6 +281,95 @@ private enum MenuBarBackgroundDetector {
         }
 
         return values.reduce(0, +) / Double(values.count)
+    }
+}
+
+private enum WallpaperMenuBarDetector {
+    static func usesDarkMenuBar(near button: NSStatusBarButton) -> Bool? {
+        guard let screen = button.window?.screen ?? NSScreen.main,
+              let wallpaperURL = NSWorkspace.shared.desktopImageURL(for: screen),
+              let image = NSImage(contentsOf: wallpaperURL),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let samplePoints = menuBarSamplePoints(near: button, on: screen)
+        let luminanceValues = samplePoints.compactMap { point in
+            sampleLuminance(at: point, screen: screen, bitmap: bitmap)
+        }
+
+        guard luminanceValues.count >= 2 else {
+            return nil
+        }
+
+        let sorted = luminanceValues.sorted()
+        let medianLuminance = sorted[sorted.count / 2]
+        return medianLuminance < 0.48
+    }
+
+    private static func menuBarSamplePoints(near button: NSStatusBarButton, on screen: NSScreen) -> [NSPoint] {
+        let buttonRect = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? .zero
+        let sampleXs: [CGFloat]
+
+        if buttonRect.isEmpty {
+            sampleXs = [
+                screen.frame.midX - 64,
+                screen.frame.midX,
+                screen.frame.midX + 64
+            ]
+        } else {
+            sampleXs = [
+                buttonRect.minX - 48,
+                buttonRect.midX - 18,
+                buttonRect.midX,
+                buttonRect.midX + 18,
+                buttonRect.maxX + 48
+            ]
+        }
+
+        let sampleYs = [
+            screen.frame.maxY - 4,
+            screen.frame.maxY - (NSStatusBar.system.thickness / 2)
+        ]
+
+        return sampleXs.flatMap { x in
+            sampleYs.map { y in
+                NSPoint(
+                    x: min(max(x, screen.frame.minX + 1), screen.frame.maxX - 1),
+                    y: min(max(y, screen.frame.minY + 1), screen.frame.maxY - 1)
+                )
+            }
+        }
+    }
+
+    private static func sampleLuminance(at point: NSPoint, screen: NSScreen, bitmap: NSBitmapImageRep) -> Double? {
+        let imageWidth = CGFloat(bitmap.pixelsWide)
+        let imageHeight = CGFloat(bitmap.pixelsHigh)
+        guard imageWidth > 0, imageHeight > 0 else {
+            return nil
+        }
+
+        let scale = max(screen.frame.width / imageWidth, screen.frame.height / imageHeight)
+        guard scale.isFinite, scale > 0 else {
+            return nil
+        }
+
+        let displayedWidth = imageWidth * scale
+        let displayedHeight = imageHeight * scale
+        let displayedOriginX = screen.frame.minX + ((screen.frame.width - displayedWidth) / 2)
+        let displayedOriginY = screen.frame.minY + ((screen.frame.height - displayedHeight) / 2)
+        let imageX = Int(((point.x - displayedOriginX) / scale).rounded())
+        let imageYFromBottom = (point.y - displayedOriginY) / scale
+        let imageY = Int((imageHeight - imageYFromBottom).rounded())
+        let clampedX = min(max(imageX, 0), bitmap.pixelsWide - 1)
+        let clampedY = min(max(imageY, 0), bitmap.pixelsHigh - 1)
+
+        guard let color = bitmap.colorAt(x: clampedX, y: clampedY)?.usingColorSpace(.deviceRGB) else {
+            return nil
+        }
+
+        return (0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent)
     }
 }
 

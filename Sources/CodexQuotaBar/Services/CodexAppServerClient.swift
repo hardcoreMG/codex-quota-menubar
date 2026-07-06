@@ -113,7 +113,7 @@ private func runAppServerRequests() throws -> [JSONRPCResponse] {
             params: [
                 "clientInfo": .object([
                     "name": .string("codex-quota-menubar"),
-                    "version": .string("0.1.2")
+                    "version": .string("0.1.3")
                 ]),
                 "capabilities": .object([
                     "experimentalApi": .bool(true)
