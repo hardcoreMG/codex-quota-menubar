@@ -8,6 +8,7 @@ BUNDLE_ID="com.kevinchin.CodexQuotaBar"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/$APP_NAME-build.XXXXXX")"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -17,12 +18,14 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_FILE="$ROOT_DIR/Assets/AppIcon.icns"
 
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
 cd "$ROOT_DIR"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-swift build
-BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+swift build --scratch-path "$BUILD_DIR"
+BUILD_BINARY="$(swift build --scratch-path "$BUILD_DIR" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"

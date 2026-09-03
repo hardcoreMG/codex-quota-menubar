@@ -8,6 +8,7 @@ VERSION="0.1.4"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/$APP_NAME-release-build.XXXXXX")"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -20,10 +21,12 @@ DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"
 ICON_FILE="$ROOT_DIR/Assets/AppIcon.icns"
 ICON_SOURCE="$ROOT_DIR/Assets/AppIcon-Source.png"
 
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
 cd "$ROOT_DIR"
 
-swift build -c release
-BUILD_BINARY="$(swift build -c release --show-bin-path)/$APP_NAME"
+swift build -c release --scratch-path "$BUILD_DIR"
+BUILD_BINARY="$(swift build -c release --scratch-path "$BUILD_DIR" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE" "$STAGING_DIR" "$DMG_PATH"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$STAGING_DIR"

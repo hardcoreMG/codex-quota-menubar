@@ -29,9 +29,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 private final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let store = QuotaStore()
+    private let lowQuotaOverlay = LowQuotaStatusOverlayView()
     private var cancellable: AnyCancellable?
     private var lastRenderState: StatusRenderState?
-    private var manuallyDetectedUsesDarkMenuBar: Bool?
 
     override init() {
         super.init()
@@ -41,6 +41,11 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.imageScaling = .scaleNone
+        if let button = statusItem.button {
+            lowQuotaOverlay.frame = button.bounds
+            lowQuotaOverlay.autoresizingMask = [.width, .height]
+            button.addSubview(lowQuotaOverlay)
+        }
         updateStatusView()
 
         cancellable = store.objectWillChange.sink { [weak self] _ in
@@ -85,7 +90,6 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             bottomValue: store.snapshot.menuWeeklyValue,
             topIsLow: shouldHighlightLowQuota(store.snapshot.fiveHourRemainingPercent),
             bottomIsLow: shouldHighlightLowQuota(store.snapshot.weeklyRemainingPercent),
-            usesDarkMenuBar: manuallyDetectedUsesDarkMenuBar ?? statusItem.button?.usesDarkMenuBarAppearance ?? false,
             toolTip: store.snapshot.menuTitle
         )
 
@@ -97,12 +101,13 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             topValue: renderState.topValue,
             bottomValue: renderState.bottomValue,
             topIsLow: renderState.topIsLow,
-            bottomIsLow: renderState.bottomIsLow,
-            usesDarkMenuBar: renderState.usesDarkMenuBar
+            bottomIsLow: renderState.bottomIsLow
         )
         statusItem.button?.image = image
         statusItem.button?.toolTip = renderState.toolTip
         statusItem.length = image.size.width
+        lowQuotaOverlay.topIsLow = renderState.topIsLow
+        lowQuotaOverlay.bottomIsLow = renderState.bottomIsLow
         lastRenderState = renderState
     }
 
@@ -169,13 +174,6 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func refresh() {
-        if let button = statusItem.button {
-            manuallyDetectedUsesDarkMenuBar =
-                MenuBarBackgroundDetector.usesDarkMenuBar(near: button) ??
-                WallpaperMenuBarDetector.usesDarkMenuBar(near: button)
-            updateStatusView(force: true)
-        }
-
         Task {
             await store.refresh()
             await MainActor.run {
@@ -194,210 +192,7 @@ private struct StatusRenderState: Equatable {
     let bottomValue: String
     let topIsLow: Bool
     let bottomIsLow: Bool
-    let usesDarkMenuBar: Bool
     let toolTip: String
-}
-
-private extension NSStatusBarButton {
-    var usesDarkMenuBarAppearance: Bool {
-        if let screenBasedResult = MenuBarBackgroundDetector.usesDarkMenuBar(near: self) {
-            return screenBasedResult
-        }
-
-        return false
-    }
-}
-
-private enum MenuBarBackgroundDetector {
-    static func usesDarkMenuBar(near button: NSStatusBarButton) -> Bool? {
-        guard CGPreflightScreenCaptureAccess(),
-              let screen = button.window?.screen ?? NSScreen.main,
-              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
-            return nil
-        }
-
-        let buttonRect = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? .zero
-        let localSampleXs: [CGFloat]
-        if buttonRect.isEmpty {
-            localSampleXs = [
-                screen.frame.midX - 80,
-                screen.frame.midX - 40,
-                screen.frame.midX + 40,
-                screen.frame.midX + 80
-            ]
-        } else {
-            localSampleXs = [
-                buttonRect.minX - 80,
-                buttonRect.minX - 56,
-                buttonRect.minX - 32,
-                buttonRect.maxX + 32,
-                buttonRect.maxX + 56,
-                buttonRect.maxX + 80
-            ]
-        }
-        let sampleYs = [
-            screen.frame.maxY - 4,
-            screen.frame.maxY - (NSStatusBar.system.thickness / 2)
-        ]
-
-        let luminanceValues = localSampleXs.flatMap { sampleX in
-            sampleYs.compactMap { sampleY in
-                sampleLuminance(at: NSPoint(x: sampleX, y: sampleY), screen: screen, displayID: displayID)
-            }
-        }
-
-        guard luminanceValues.count >= 2 else {
-            return nil
-        }
-
-        let sorted = luminanceValues.sorted()
-        let medianLuminance = sorted[sorted.count / 2]
-        return MenuBarContrastHeuristic.usesDarkMenuBar(luminance: medianLuminance, saturation: nil)
-    }
-
-    private static func sampleLuminance(at point: NSPoint, screen: NSScreen, displayID: CGDirectDisplayID) -> Double? {
-        let scale = screen.backingScaleFactor
-        let pixelX = (point.x - screen.frame.minX) * scale
-        let pixelY = (point.y - screen.frame.minY) * scale
-        let captureRect = CGRect(x: pixelX - 2, y: pixelY - 2, width: 4, height: 4)
-
-        guard let image = CGDisplayCreateImage(displayID, rect: captureRect) else {
-            return nil
-        }
-
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        var values: [Double] = []
-
-        for x in 0..<bitmap.pixelsWide {
-            for y in 0..<bitmap.pixelsHigh {
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
-                    continue
-                }
-
-                values.append((0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent))
-            }
-        }
-
-        guard !values.isEmpty else {
-            return nil
-        }
-
-        return values.reduce(0, +) / Double(values.count)
-    }
-}
-
-private enum MenuBarContrastHeuristic {
-    static func usesDarkMenuBar(luminance: Double, saturation: Double?) -> Bool {
-        if luminance < 0.62 {
-            return true
-        }
-
-        if let saturation, saturation > 0.25, luminance < 0.72 {
-            return true
-        }
-
-        return false
-    }
-}
-
-private enum WallpaperMenuBarDetector {
-    static func usesDarkMenuBar(near button: NSStatusBarButton) -> Bool? {
-        guard let screen = button.window?.screen ?? NSScreen.main,
-              let wallpaperURL = NSWorkspace.shared.desktopImageURL(for: screen),
-              let image = NSImage(contentsOf: wallpaperURL),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let bitmap = NSBitmapImageRep(cgImage: cgImage)
-        let samplePoints = menuBarSamplePoints(near: button, on: screen)
-        let samples = samplePoints.compactMap { point in
-            sampleColor(at: point, screen: screen, bitmap: bitmap)
-        }
-
-        guard samples.count >= 2 else {
-            return nil
-        }
-
-        let sortedLuminance = samples.map(\.luminance).sorted()
-        let sortedSaturation = samples.map(\.saturation).sorted()
-        let medianLuminance = sortedLuminance[sortedLuminance.count / 2]
-        let medianSaturation = sortedSaturation[sortedSaturation.count / 2]
-        return MenuBarContrastHeuristic.usesDarkMenuBar(luminance: medianLuminance, saturation: medianSaturation)
-    }
-
-    private static func menuBarSamplePoints(near button: NSStatusBarButton, on screen: NSScreen) -> [NSPoint] {
-        let buttonRect = button.window?.convertToScreen(button.convert(button.bounds, to: nil)) ?? .zero
-        let sampleXs: [CGFloat]
-
-        if buttonRect.isEmpty {
-            sampleXs = [
-                screen.frame.midX - 64,
-                screen.frame.midX,
-                screen.frame.midX + 64
-            ]
-        } else {
-            sampleXs = [
-                buttonRect.minX - 48,
-                buttonRect.midX - 18,
-                buttonRect.midX,
-                buttonRect.midX + 18,
-                buttonRect.maxX + 48
-            ]
-        }
-
-        let sampleYs = [
-            screen.frame.maxY - 4,
-            screen.frame.maxY - (NSStatusBar.system.thickness / 2)
-        ]
-
-        return sampleXs.flatMap { x in
-            sampleYs.map { y in
-                NSPoint(
-                    x: min(max(x, screen.frame.minX + 1), screen.frame.maxX - 1),
-                    y: min(max(y, screen.frame.minY + 1), screen.frame.maxY - 1)
-                )
-            }
-        }
-    }
-
-    private static func sampleColor(at point: NSPoint, screen: NSScreen, bitmap: NSBitmapImageRep) -> ColorSample? {
-        let imageWidth = CGFloat(bitmap.pixelsWide)
-        let imageHeight = CGFloat(bitmap.pixelsHigh)
-        guard imageWidth > 0, imageHeight > 0 else {
-            return nil
-        }
-
-        let scale = max(screen.frame.width / imageWidth, screen.frame.height / imageHeight)
-        guard scale.isFinite, scale > 0 else {
-            return nil
-        }
-
-        let displayedWidth = imageWidth * scale
-        let displayedHeight = imageHeight * scale
-        let displayedOriginX = screen.frame.minX + ((screen.frame.width - displayedWidth) / 2)
-        let displayedOriginY = screen.frame.minY + ((screen.frame.height - displayedHeight) / 2)
-        let imageX = Int(((point.x - displayedOriginX) / scale).rounded())
-        let imageYFromBottom = (point.y - displayedOriginY) / scale
-        let imageY = Int((imageHeight - imageYFromBottom).rounded())
-        let clampedX = min(max(imageX, 0), bitmap.pixelsWide - 1)
-        let clampedY = min(max(imageY, 0), bitmap.pixelsHigh - 1)
-
-        guard let color = bitmap.colorAt(x: clampedX, y: clampedY)?.usingColorSpace(.deviceRGB) else {
-            return nil
-        }
-
-        let luminance = (0.2126 * color.redComponent) + (0.7152 * color.greenComponent) + (0.0722 * color.blueComponent)
-        let maxComponent = max(color.redComponent, color.greenComponent, color.blueComponent)
-        let minComponent = min(color.redComponent, color.greenComponent, color.blueComponent)
-        let saturation = maxComponent > 0 ? (maxComponent - minComponent) / maxComponent : 0
-        return ColorSample(luminance: luminance, saturation: saturation)
-    }
-
-    private struct ColorSample {
-        let luminance: Double
-        let saturation: Double
-    }
 }
 
 private final class LowQuotaSwitchView: NSView {
@@ -583,48 +378,45 @@ private enum QuotaStatusImageRenderer {
     private static let badgeGap: CGFloat = 4
     private static let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
     private static let badgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
-    private static let lowQuotaBadgeColor = NSColor.systemRed
-
-    static func render(topValue: String, bottomValue: String, topIsLow: Bool, bottomIsLow: Bool, usesDarkMenuBar: Bool) -> NSImage {
+    static func render(topValue: String, bottomValue: String, topIsLow: Bool, bottomIsLow: Bool) -> NSImage {
         let valueWidth = max(measuredWidth(topValue), measuredWidth(bottomValue))
         let width = ceil(horizontalPadding + badgeWidth + badgeGap + valueWidth + horizontalPadding)
         let height = NSStatusBar.system.thickness
         let image = NSImage(size: NSSize(width: width, height: height))
-        image.isTemplate = false
+        // A template image lets macOS apply exactly the same foreground color as
+        // the other menu bar items, including wallpaper-driven light/dark changes.
+        image.isTemplate = true
 
         image.lockFocusFlipped(true)
         defer {
             image.unlockFocus()
         }
 
-        let palette = Palette(usesDarkMenuBar: usesDarkMenuBar)
-        drawRow(badge: "5H", value: topValue, y: 0, width: width, isLow: topIsLow, palette: palette)
-        drawRow(badge: "W", value: bottomValue, y: 10, width: width, isLow: bottomIsLow, palette: palette)
+        drawRow(badge: "5H", value: topValue, y: 0, width: width, drawBadge: !topIsLow)
+        drawRow(badge: "W", value: bottomValue, y: 10, width: width, drawBadge: !bottomIsLow)
 
         return image
     }
 
-    private static func drawRow(badge: String, value: String, y: CGFloat, width: CGFloat, isLow: Bool, palette: Palette) {
-        let badgeRect = NSRect(x: horizontalPadding, y: y + 2, width: badgeWidth, height: badgeHeight)
-        let path = NSBezierPath(roundedRect: badgeRect, xRadius: badgeHeight / 2, yRadius: badgeHeight / 2)
-        (isLow ? lowQuotaBadgeColor : palette.badgeColor).setFill()
-        path.fill()
-        (isLow ? NSColor.white.withAlphaComponent(0.35) : palette.badgeStrokeColor).setStroke()
-        path.lineWidth = 0.45
-        path.stroke()
+    private static func drawRow(badge: String, value: String, y: CGFloat, width: CGFloat, drawBadge shouldDrawBadge: Bool) {
+        if shouldDrawBadge {
+            let badgeRect = NSRect(x: horizontalPadding, y: y + 2, width: badgeWidth, height: badgeHeight)
+            let path = NSBezierPath(roundedRect: badgeRect, xRadius: badgeHeight / 2, yRadius: badgeHeight / 2)
+            NSColor.black.setFill()
+            path.fill()
 
-        drawBadge(
-            text: badge,
-            in: NSRect(x: badgeRect.minX, y: y + 1.15, width: badgeRect.width, height: 9.5),
-            color: isLow ? .white : palette.badgeTextColor
-        )
+            // Clear the lettering out of the mask. The resulting template becomes
+            // a filled system-colored pill with transparent lettering.
+            NSGraphicsContext.current?.compositingOperation = .clear
+            drawBadge(text: badge, in: NSRect(x: badgeRect.minX, y: y + 1.15, width: badgeRect.width, height: 9.5), color: .black)
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+        }
 
         let valueX = horizontalPadding + badgeWidth + badgeGap
         drawValue(
             text: value,
             in: NSRect(x: valueX, y: y, width: width - valueX, height: 9.5),
-            color: palette.valueColor,
-            strokeColor: palette.valueStrokeColor
+            color: .black
         )
     }
 
@@ -640,15 +432,13 @@ private enum QuotaStatusImageRenderer {
         NSString(string: text).draw(in: rect, withAttributes: attributes)
     }
 
-    private static func drawValue(text: String, in rect: NSRect, color: NSColor, strokeColor: NSColor) {
+    private static func drawValue(text: String, in rect: NSRect, color: NSColor) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .left
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: valueFont,
             .foregroundColor: color,
-            .strokeColor: strokeColor,
-            .strokeWidth: -1.8,
             .paragraphStyle: paragraph
         ]
         NSString(string: text).draw(in: rect, withAttributes: attributes)
@@ -661,27 +451,37 @@ private enum QuotaStatusImageRenderer {
         return NSString(string: text).size(withAttributes: attributes).width
     }
 
-    private struct Palette {
-        let badgeColor: NSColor
-        let badgeTextColor: NSColor
-        let badgeStrokeColor: NSColor
-        let valueColor: NSColor
-        let valueStrokeColor: NSColor
+}
 
-        init(usesDarkMenuBar: Bool) {
-            if usesDarkMenuBar {
-                badgeColor = .white
-                badgeTextColor = .black
-                badgeStrokeColor = NSColor.black.withAlphaComponent(0.35)
-                valueColor = .white
-                valueStrokeColor = NSColor.black.withAlphaComponent(0.8)
-            } else {
-                badgeColor = .black
-                badgeTextColor = .white
-                badgeStrokeColor = NSColor.white.withAlphaComponent(0.55)
-                valueColor = .black
-                valueStrokeColor = NSColor.white.withAlphaComponent(0.9)
-            }
-        }
+private final class LowQuotaStatusOverlayView: NSView {
+    var topIsLow = false { didSet { needsDisplay = true } }
+    var bottomIsLow = false { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        if topIsLow { drawBadge("5H", y: 2) }
+        if bottomIsLow { drawBadge("W", y: 12) }
+    }
+
+    private func drawBadge(_ text: String, y: CGFloat) {
+        let rect = NSRect(x: 5, y: y, width: 17, height: 8)
+        NSColor.systemRed.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        NSString(string: text).draw(
+            in: NSRect(x: rect.minX, y: y - 0.85, width: rect.width, height: 9.5),
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 7.5, weight: .medium),
+                .foregroundColor: NSColor.white,
+                .paragraphStyle: paragraph
+            ]
+        )
     }
 }
