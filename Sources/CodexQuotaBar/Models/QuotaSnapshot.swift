@@ -1,23 +1,57 @@
 import Foundation
 
+struct QuotaDisplayRow: Equatable {
+    let badge: String
+    let value: String
+    let remainingPercent: Int?
+    let resetLabel: String
+    let resetValue: String
+}
+
 struct QuotaSnapshot {
     var fiveHourUsedPercent: Int?
     var fiveHourResetAt: Date?
     var weeklyUsedPercent: Int?
     var weeklyResetAt: Date?
-    var resetCredits: Int?
-    var lifetimeTokens: Int?
-    var updatedAt: Date?
     var errorMessage: String?
 
     static let empty = QuotaSnapshot()
 
-    var menuTitle: String {
-        "\(menuFiveHourTitle) | \(menuWeeklyTitle)"
+    var displayRows: [QuotaDisplayRow] {
+        var rows: [QuotaDisplayRow] = []
+
+        if fiveHourUsedPercent != nil || fiveHourResetAt != nil {
+            rows.append(QuotaDisplayRow(
+                badge: "5H",
+                value: menuFiveHourValue,
+                remainingPercent: fiveHourRemainingPercent,
+                resetLabel: fiveHourResetLabel,
+                resetValue: fiveHourResetValue
+            ))
+        }
+
+        if weeklyUsedPercent != nil || weeklyResetAt != nil {
+            rows.append(QuotaDisplayRow(
+                badge: "W",
+                value: menuWeeklyValue,
+                remainingPercent: weeklyRemainingPercent,
+                resetLabel: weeklyResetLabel,
+                resetValue: weeklyResetValue
+            ))
+        }
+
+        if rows.isEmpty {
+            return [
+                QuotaDisplayRow(badge: "5H", value: "--", remainingPercent: nil, resetLabel: fiveHourResetLabel, resetValue: "--"),
+                QuotaDisplayRow(badge: "W", value: "--", remainingPercent: nil, resetLabel: weeklyResetLabel, resetValue: "--")
+            ]
+        }
+
+        return rows
     }
 
-    var menuFiveHourTitle: String {
-        fiveHourUsedPercent.map { "5h \(100 - $0)%" } ?? "5h --"
+    var menuTitle: String {
+        displayRows.map { "\($0.badge) \($0.value)" }.joined(separator: " | ")
     }
 
     var menuFiveHourValue: String {
@@ -28,36 +62,12 @@ struct QuotaSnapshot {
         fiveHourUsedPercent.map { 100 - $0 }
     }
 
-    var menuWeeklyTitle: String {
-        weeklyUsedPercent.map { "W  \(100 - $0)%" } ?? "W  --"
-    }
-
     var menuWeeklyValue: String {
         weeklyUsedPercent.map { "\(100 - $0)%" } ?? "--"
     }
 
     var weeklyRemainingPercent: Int? {
         weeklyUsedPercent.map { 100 - $0 }
-    }
-
-    var fiveHourLine: String {
-        guard let fiveHourUsedPercent else {
-            return "5h: unavailable"
-        }
-
-        return "5h: \(fiveHourUsedPercent)% used, \(100 - fiveHourUsedPercent)% left"
-    }
-
-    var weeklyLine: String {
-        guard let weeklyUsedPercent else {
-            return "Weekly: unavailable"
-        }
-
-        return "Weekly: \(weeklyUsedPercent)% used, \(100 - weeklyUsedPercent)% left"
-    }
-
-    var fiveHourResetLine: String {
-        "\(fiveHourResetLabel) \(fiveHourResetValue)"
     }
 
     var fiveHourResetLabel: String {
@@ -68,10 +78,6 @@ struct QuotaSnapshot {
         fiveHourResetAt.map { DateFormatter.quotaHour.string(from: $0) } ?? "--"
     }
 
-    var weeklyResetLine: String {
-        "\(weeklyResetLabel) \(weeklyResetValue)"
-    }
-
     var weeklyResetLabel: String {
         "W  刷新"
     }
@@ -80,19 +86,4 @@ struct QuotaSnapshot {
         weeklyResetAt.map { DateFormatter.quotaHour.string(from: $0) } ?? "--"
     }
 
-    var updatedLabel: String {
-        "上次刷新"
-    }
-
-    var updatedValue: String {
-        updatedAt.map { DateFormatter.quotaHour.string(from: $0) } ?? "--"
-    }
-
-    var updatedLine: String {
-        if let errorMessage {
-            return "错误：\(errorMessage)"
-        }
-
-        return "\(updatedLabel) \(updatedValue)"
-    }
 }

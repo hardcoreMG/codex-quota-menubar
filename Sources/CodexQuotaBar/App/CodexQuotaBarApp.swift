@@ -85,11 +85,15 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func updateStatusView(force: Bool = false) {
+        let rows = store.snapshot.displayRows.map { row in
+            StatusRenderRow(
+                badge: row.badge,
+                value: row.value,
+                isLow: shouldHighlightLowQuota(row.remainingPercent)
+            )
+        }
         let renderState = StatusRenderState(
-            topValue: store.snapshot.menuFiveHourValue,
-            bottomValue: store.snapshot.menuWeeklyValue,
-            topIsLow: shouldHighlightLowQuota(store.snapshot.fiveHourRemainingPercent),
-            bottomIsLow: shouldHighlightLowQuota(store.snapshot.weeklyRemainingPercent),
+            rows: rows,
             toolTip: store.snapshot.menuTitle
         )
 
@@ -97,17 +101,11 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             return
         }
 
-        let image = QuotaStatusImageRenderer.render(
-            topValue: renderState.topValue,
-            bottomValue: renderState.bottomValue,
-            topIsLow: renderState.topIsLow,
-            bottomIsLow: renderState.bottomIsLow
-        )
+        let image = QuotaStatusImageRenderer.render(rows: renderState.rows)
         statusItem.button?.image = image
         statusItem.button?.toolTip = renderState.toolTip
         statusItem.length = image.size.width
-        lowQuotaOverlay.topIsLow = renderState.topIsLow
-        lowQuotaOverlay.bottomIsLow = renderState.bottomIsLow
+        lowQuotaOverlay.rows = renderState.rows
         lastRenderState = renderState
     }
 
@@ -120,8 +118,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.removeAllItems()
 
-        menu.addItem(alignedInfoItem(label: store.snapshot.fiveHourResetLabel, value: store.snapshot.fiveHourResetValue))
-        menu.addItem(alignedInfoItem(label: store.snapshot.weeklyResetLabel, value: store.snapshot.weeklyResetValue))
+        for row in store.snapshot.displayRows {
+            menu.addItem(alignedInfoItem(label: row.resetLabel, value: row.resetValue))
+        }
 
         if let errorMessage = store.snapshot.errorMessage {
             menu.addItem(.separator())
@@ -188,11 +187,14 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 }
 
 private struct StatusRenderState: Equatable {
-    let topValue: String
-    let bottomValue: String
-    let topIsLow: Bool
-    let bottomIsLow: Bool
+    let rows: [StatusRenderRow]
     let toolTip: String
+}
+
+private struct StatusRenderRow: Equatable {
+    let badge: String
+    let value: String
+    let isLow: Bool
 }
 
 private final class LowQuotaSwitchView: NSView {
@@ -371,16 +373,117 @@ private final class PillSwitchControl: NSControl {
     }
 }
 
+private enum QuotaStatusLayout {
+    static let horizontalPadding: CGFloat = 2
+    static let badgeGap: CGFloat = 4
+    static let inlineBadgeSize = NSSize(width: 17, height: 8)
+    static let stackedBadgeSize = NSSize(width: 17, height: 8)
+    static let inlineValueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+    static let stackedValueFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    static let inlineBadgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
+    static let stackedBadgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
+
+    static func stackedBadgeRect(in bounds: NSRect) -> NSRect {
+        NSRect(
+            x: pixelAligned((bounds.width - stackedBadgeSize.width) / 2),
+            y: 0.5,
+            width: stackedBadgeSize.width,
+            height: stackedBadgeSize.height
+        )
+    }
+
+    static func inlineBadgeRect(rowY: CGFloat) -> NSRect {
+        NSRect(
+            x: horizontalPadding,
+            y: rowY + 2,
+            width: inlineBadgeSize.width,
+            height: inlineBadgeSize.height
+        )
+    }
+
+    static func rowYOffsets(count: Int) -> [CGFloat] {
+        count == 1 ? [5] : Array(0..<count).map { CGFloat($0 * 10) }
+    }
+
+    private static func pixelAligned(_ value: CGFloat) -> CGFloat {
+        (value * 2).rounded() / 2
+    }
+}
+
+private enum QuotaStatusDrawing {
+    static func drawBadge(
+        text: String,
+        in rect: NSRect,
+        font: NSFont,
+        fillColor: NSColor,
+        textColor: NSColor,
+        clearsText: Bool
+    ) {
+        fillColor.setFill()
+        NSBezierPath(
+            roundedRect: rect,
+            xRadius: rect.height / 2,
+            yRadius: rect.height / 2
+        ).fill()
+
+        if clearsText {
+            NSGraphicsContext.current?.compositingOperation = .clear
+        }
+
+        drawText(text, in: rect, font: font, color: textColor, alignment: .center, verticallyCentered: true)
+
+        if clearsText {
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+        }
+    }
+
+    static func drawText(
+        _ text: String,
+        in bounds: NSRect,
+        font: NSFont,
+        color: NSColor,
+        alignment: NSTextAlignment,
+        verticallyCentered: Bool = false
+    ) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ]
+        var drawingRect = bounds
+
+        if verticallyCentered {
+            let textHeight = NSString(string: text).size(withAttributes: attributes).height
+            drawingRect.origin.y = bounds.midY - textHeight / 2
+            drawingRect.size.height = textHeight
+        }
+
+        NSString(string: text).draw(in: drawingRect, withAttributes: attributes)
+    }
+
+    static func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
+        NSString(string: text).size(withAttributes: [.font: font]).width
+    }
+}
+
 private enum QuotaStatusImageRenderer {
-    private static let horizontalPadding: CGFloat = 5
-    private static let badgeWidth: CGFloat = 17
-    private static let badgeHeight: CGFloat = 8
-    private static let badgeGap: CGFloat = 4
-    private static let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-    private static let badgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
-    static func render(topValue: String, bottomValue: String, topIsLow: Bool, bottomIsLow: Bool) -> NSImage {
-        let valueWidth = max(measuredWidth(topValue), measuredWidth(bottomValue))
-        let width = ceil(horizontalPadding + badgeWidth + badgeGap + valueWidth + horizontalPadding)
+    static func render(rows: [StatusRenderRow]) -> NSImage {
+        if let row = rows.first, rows.count == 1 {
+            return renderStacked(row: row)
+        }
+
+        let valueWidth = rows.map {
+            QuotaStatusDrawing.measuredWidth($0.value, font: QuotaStatusLayout.inlineValueFont)
+        }.max() ?? 0
+        let width = ceil(
+            QuotaStatusLayout.horizontalPadding
+                + QuotaStatusLayout.inlineBadgeSize.width
+                + QuotaStatusLayout.badgeGap
+                + valueWidth
+                + QuotaStatusLayout.horizontalPadding
+        )
         let height = NSStatusBar.system.thickness
         let image = NSImage(size: NSSize(width: width, height: height))
         // A template image lets macOS apply exactly the same foreground color as
@@ -392,70 +495,93 @@ private enum QuotaStatusImageRenderer {
             image.unlockFocus()
         }
 
-        drawRow(badge: "5H", value: topValue, y: 0, width: width, drawBadge: !topIsLow)
-        drawRow(badge: "W", value: bottomValue, y: 10, width: width, drawBadge: !bottomIsLow)
+        for (row, y) in zip(rows, QuotaStatusLayout.rowYOffsets(count: rows.count)) {
+            drawInlineRow(row, y: y, width: width)
+        }
 
         return image
     }
 
-    private static func drawRow(badge: String, value: String, y: CGFloat, width: CGFloat, drawBadge shouldDrawBadge: Bool) {
-        if shouldDrawBadge {
-            let badgeRect = NSRect(x: horizontalPadding, y: y + 2, width: badgeWidth, height: badgeHeight)
-            let path = NSBezierPath(roundedRect: badgeRect, xRadius: badgeHeight / 2, yRadius: badgeHeight / 2)
-            NSColor.black.setFill()
-            path.fill()
+    private static func renderStacked(row: StatusRenderRow) -> NSImage {
+        let valueWidth = QuotaStatusDrawing.measuredWidth(
+            row.value,
+            font: QuotaStatusLayout.stackedValueFont
+        )
+        let width = ceil(
+            max(QuotaStatusLayout.stackedBadgeSize.width, valueWidth)
+                + QuotaStatusLayout.horizontalPadding * 2
+        )
+        let height = NSStatusBar.system.thickness
+        let image = NSImage(size: NSSize(width: width, height: height))
+        image.isTemplate = true
 
-            // Clear the lettering out of the mask. The resulting template becomes
-            // a filled system-colored pill with transparent lettering.
-            NSGraphicsContext.current?.compositingOperation = .clear
-            drawBadge(text: badge, in: NSRect(x: badgeRect.minX, y: y + 1.15, width: badgeRect.width, height: 9.5), color: .black)
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
+        image.lockFocusFlipped(true)
+        defer {
+            image.unlockFocus()
         }
 
-        let valueX = horizontalPadding + badgeWidth + badgeGap
-        drawValue(
-            text: value,
-            in: NSRect(x: valueX, y: y, width: width - valueX, height: 9.5),
-            color: .black
+        let bounds = NSRect(origin: .zero, size: image.size)
+        let badgeRect = QuotaStatusLayout.stackedBadgeRect(in: bounds)
+
+        if !row.isLow {
+            QuotaStatusDrawing.drawBadge(
+                text: row.badge,
+                in: badgeRect,
+                font: QuotaStatusLayout.stackedBadgeFont,
+                fillColor: .black,
+                textColor: .black,
+                clearsText: true
+            )
+        }
+
+        let valueBounds = NSRect(
+            x: QuotaStatusLayout.horizontalPadding,
+            y: badgeRect.maxY,
+            width: width - QuotaStatusLayout.horizontalPadding * 2,
+            height: height - badgeRect.maxY
+        )
+        QuotaStatusDrawing.drawText(
+            row.value,
+            in: valueBounds,
+            font: QuotaStatusLayout.stackedValueFont,
+            color: .black,
+            alignment: .center,
+            verticallyCentered: true
+        )
+
+        return image
+    }
+
+    private static func drawInlineRow(_ row: StatusRenderRow, y: CGFloat, width: CGFloat) {
+        let badgeRect = QuotaStatusLayout.inlineBadgeRect(rowY: y)
+
+        if !row.isLow {
+            // Clear the lettering out of the mask. The resulting template becomes
+            // a filled system-colored pill with transparent lettering.
+            QuotaStatusDrawing.drawBadge(
+                text: row.badge,
+                in: badgeRect,
+                font: QuotaStatusLayout.inlineBadgeFont,
+                fillColor: .black,
+                textColor: .black,
+                clearsText: true
+            )
+        }
+
+        let valueX = badgeRect.maxX + QuotaStatusLayout.badgeGap
+        QuotaStatusDrawing.drawText(
+            row.value,
+            in: NSRect(x: valueX, y: y, width: width - valueX, height: 10),
+            font: QuotaStatusLayout.inlineValueFont,
+            color: .black,
+            alignment: .left,
+            verticallyCentered: true
         )
     }
-
-    private static func drawBadge(text: String, in rect: NSRect, color: NSColor) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: badgeFont,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
-        ]
-        NSString(string: text).draw(in: rect, withAttributes: attributes)
-    }
-
-    private static func drawValue(text: String, in rect: NSRect, color: NSColor) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .left
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: valueFont,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
-        ]
-        NSString(string: text).draw(in: rect, withAttributes: attributes)
-    }
-
-    private static func measuredWidth(_ text: String) -> CGFloat {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: valueFont
-        ]
-        return NSString(string: text).size(withAttributes: attributes).width
-    }
-
 }
 
 private final class LowQuotaStatusOverlayView: NSView {
-    var topIsLow = false { didSet { needsDisplay = true } }
-    var bottomIsLow = false { didSet { needsDisplay = true } }
+    var rows: [StatusRenderRow] = [] { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
 
@@ -464,24 +590,27 @@ private final class LowQuotaStatusOverlayView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        if topIsLow { drawBadge("5H", y: 2) }
-        if bottomIsLow { drawBadge("W", y: 12) }
-    }
+        if let row = rows.first, rows.count == 1, row.isLow {
+            QuotaStatusDrawing.drawBadge(
+                text: row.badge,
+                in: QuotaStatusLayout.stackedBadgeRect(in: bounds),
+                font: QuotaStatusLayout.stackedBadgeFont,
+                fillColor: .systemRed,
+                textColor: .white,
+                clearsText: false
+            )
+            return
+        }
 
-    private func drawBadge(_ text: String, y: CGFloat) {
-        let rect = NSRect(x: 5, y: y, width: 17, height: 8)
-        NSColor.systemRed.setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        NSString(string: text).draw(
-            in: NSRect(x: rect.minX, y: y - 0.85, width: rect.width, height: 9.5),
-            withAttributes: [
-                .font: NSFont.systemFont(ofSize: 7.5, weight: .medium),
-                .foregroundColor: NSColor.white,
-                .paragraphStyle: paragraph
-            ]
-        )
+        for (row, y) in zip(rows, QuotaStatusLayout.rowYOffsets(count: rows.count)) where row.isLow {
+            QuotaStatusDrawing.drawBadge(
+                text: row.badge,
+                in: QuotaStatusLayout.inlineBadgeRect(rowY: y),
+                font: QuotaStatusLayout.inlineBadgeFont,
+                fillColor: .systemRed,
+                textColor: .white,
+                clearsText: false
+            )
+        }
     }
 }
