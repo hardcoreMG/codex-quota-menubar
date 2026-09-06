@@ -3,7 +3,6 @@ import Foundation
 struct CodexRateLimitResponse: Decodable {
     let rateLimits: RateLimitSnapshot
     let rateLimitsByLimitId: [String: RateLimitSnapshot]?
-    let rateLimitResetCredits: RateLimitResetCreditsSummary?
 
     var codexLimit: RateLimitSnapshot {
         rateLimitsByLimitId?["codex"] ?? rateLimits
@@ -11,39 +10,31 @@ struct CodexRateLimitResponse: Decodable {
 }
 
 struct RateLimitSnapshot: Decodable {
-    let limitId: String?
-    let limitName: String?
     let primary: RateLimitWindow?
     let secondary: RateLimitWindow?
-    let credits: CreditsSnapshot?
-    let individualLimit: SpendControlLimitSnapshot?
-    let planType: String?
-    let rateLimitReachedType: String?
+
+    var fiveHourWindow: RateLimitWindow? {
+        window(durationMinutes: 5 * 60, legacyFallback: primary)
+    }
+
+    var weeklyWindow: RateLimitWindow? {
+        window(durationMinutes: 7 * 24 * 60, legacyFallback: secondary)
+    }
+
+    private func window(durationMinutes: Int, legacyFallback: RateLimitWindow?) -> RateLimitWindow? {
+        let windows = [primary, secondary].compactMap { $0 }
+
+        if let matchingWindow = windows.first(where: { $0.windowDurationMins == durationMinutes }) {
+            return matchingWindow
+        }
+
+        // Older app-server responses did not always include windowDurationMins.
+        return windows.allSatisfy { $0.windowDurationMins == nil } ? legacyFallback : nil
+    }
 }
 
 struct RateLimitWindow: Decodable {
     let usedPercent: Int
     let windowDurationMins: Int?
     let resetsAt: Int?
-
-    var remainingPercent: Int {
-        max(0, min(100, 100 - usedPercent))
-    }
-}
-
-struct CreditsSnapshot: Decodable {
-    let hasCredits: Bool
-    let unlimited: Bool
-    let balance: String?
-}
-
-struct SpendControlLimitSnapshot: Decodable {
-    let limit: String
-    let remainingPercent: Int
-    let resetsAt: Int
-    let used: String
-}
-
-struct RateLimitResetCreditsSummary: Decodable {
-    let availableCount: Int
 }

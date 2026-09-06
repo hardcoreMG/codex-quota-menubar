@@ -8,20 +8,16 @@ struct CodexAppServerClient {
         try await Task.detached(priority: .userInitiated) {
             let responses = try runAppServerRequests()
             let rateLimits: CodexRateLimitResponse = try decodeResult(id: 2, from: responses)
-            let usage: CodexUsageResponse? = try? decodeResult(id: 3, from: responses)
 
             let codexLimit = rateLimits.codexLimit
-            let primary = codexLimit.primary
-            let secondary = codexLimit.secondary
+            let fiveHourWindow = codexLimit.fiveHourWindow
+            let weeklyWindow = codexLimit.weeklyWindow
 
             return QuotaSnapshot(
-                fiveHourUsedPercent: primary?.usedPercent,
-                fiveHourResetAt: primary?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                weeklyUsedPercent: secondary?.usedPercent,
-                weeklyResetAt: secondary?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                resetCredits: rateLimits.rateLimitResetCredits?.availableCount,
-                lifetimeTokens: usage?.summary.lifetimeTokens,
-                updatedAt: Date(),
+                fiveHourUsedPercent: fiveHourWindow?.usedPercent,
+                fiveHourResetAt: fiveHourWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                weeklyUsedPercent: weeklyWindow?.usedPercent,
+                weeklyResetAt: weeklyWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
                 errorMessage: nil
             )
         }.value
@@ -87,10 +83,9 @@ private func runAppServerRequests() throws -> [JSONRPCResponse] {
         }
 
         let hasRateLimits = responses.contains { $0.id == 2 }
-        let hasUsage = responses.contains { $0.id == 3 }
         lock.unlock()
 
-        if hasRateLimits && hasUsage {
+        if hasRateLimits {
             semaphore.signal()
         }
     }
@@ -120,8 +115,7 @@ private func runAppServerRequests() throws -> [JSONRPCResponse] {
                 ])
             ]
         ),
-        JSONRPCRequest(id: 2, method: "account/rateLimits/read", params: [:]),
-        JSONRPCRequest(id: 3, method: "account/usage/read", params: [:])
+        JSONRPCRequest(id: 2, method: "account/rateLimits/read", params: [:])
     ]
 
     for request in requests {
