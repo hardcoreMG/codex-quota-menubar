@@ -14,14 +14,6 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    var menuTitle: String {
-        snapshot.menuTitle
-    }
-
-    var statusLine: String {
-        isRefreshing ? "正在刷新..." : snapshot.updatedLine
-    }
-
     init() {
         lowQuotaAlertEnabled = UserDefaults.standard.bool(forKey: Self.lowQuotaAlertKey)
 
@@ -47,14 +39,9 @@ final class QuotaStore: ObservableObject {
             snapshot = try await client.readQuota()
         } catch {
             snapshot = QuotaSnapshot(
-                updatedAt: Date(),
                 errorMessage: error.localizedDescription
             )
         }
-    }
-
-    func toggleLowQuotaAlert() {
-        lowQuotaAlertEnabled.toggle()
     }
 
     func setLowQuotaAlertEnabled(_ isEnabled: Bool) {
