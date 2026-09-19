@@ -2,7 +2,9 @@
 
 项目名称：Codex 额度菜单显示小工具
 
-开发者：嘉文钱
+原作者：嘉文钱
+
+本仓库维护者：hardcoreMG
 
 工程名：`CodexQuotaBar`
 
@@ -27,7 +29,7 @@ GitHub 仓库默认只发布源码，不发布预构建的 `.app` 或 `.dmg`。
 生成产物：
 
 ```text
-dist/CodexQuotaBar-0.1.4.dmg
+dist/CodexQuotaBar-0.1.5.dmg
 ```
 
 这个 DMG 默认是 ad-hoc 签名，只适合本机自用或开发测试。
@@ -71,3 +73,9 @@ W  <percent>
 6. 用 `spctl` 做 Gatekeeper 验证。
 
 未完成以上步骤时，不建议把 `.dmg` 上传到 GitHub Releases 作为面向其他用户的安装包。
+
+## 维护流程
+
+日常修复从本仓库 `main` 创建分支，验证后合入 `main`。发布前运行 `swift test` 和 `swift build -c release`，更新打包版本与 CHANGELOG，再创建对应版本 tag。
+
+`origin` 指向 `hardcoreMG/codex-quota-menubar`；`upstream` 指向 `kevinchin12/codex-quota-menubar`。使用 `git fetch upstream` 查看上游更新，审查后按需合并，重新验证。

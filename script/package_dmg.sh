@@ -4,7 +4,7 @@ set -euo pipefail
 APP_NAME="CodexQuotaBar"
 DISPLAY_NAME="Codex额度菜单显示小工具"
 BUNDLE_ID="com.kevinchin.CodexQuotaBar"
-VERSION="0.1.4"
+VERSION="0.1.5"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
