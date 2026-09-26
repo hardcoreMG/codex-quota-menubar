@@ -31,6 +31,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     private let store = QuotaStore()
     private let lowQuotaOverlay = LowQuotaStatusOverlayView()
     private var cancellable: AnyCancellable?
+    private var countdownTimer: Timer?
+    private var countdownRows: [(deadline: Date, expiredValue: String?, row: MenuInfoRowView)] = []
+    private var isMenuOpen = false
     private var lastRenderState: StatusRenderState?
 
     override init() {
@@ -51,6 +54,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         cancellable = store.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async {
                 self?.updateStatusView()
+                if let self, self.isMenuOpen, let menu = self.statusItem.menu {
+                    self.populateMenu(menu)
+                }
             }
         }
 
@@ -75,6 +81,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     deinit {
+        countdownTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -116,10 +123,80 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             await store.refresh()
         }
 
+        populateMenu(menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        updateCountdowns()
+        countdownTimer?.invalidate()
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            // This timer is registered only on the main run loop.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.updateCountdowns()
+                Task { await self.store.refresh() }
+            }
+        }
+        countdownTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+    }
+
+    private func updateCountdowns() {
+        let now = Date()
+        for entry in countdownRows {
+            let value = entry.deadline <= now ? entry.expiredValue : nil
+            entry.row.updateValue(value ?? QuotaCountdown.string(until: entry.deadline, at: now))
+        }
+    }
+
+    private func populateMenu(_ menu: NSMenu) {
+        countdownRows.removeAll()
         menu.removeAllItems()
 
         for row in store.snapshot.displayRows {
-            menu.addItem(alignedInfoItem(label: row.resetLabel, value: row.resetValue))
+            if row.badge == "W", let deadline = store.snapshot.weeklyResetAt {
+                let item = NSMenuItem()
+                let view = MenuInfoRowView(label: "\(row.resetLabel)  \(row.resetValue)",
+                                           value: QuotaCountdown.string(until: deadline))
+                item.view = view
+                countdownRows.append((deadline, nil, view))
+                menu.addItem(item)
+            } else {
+                menu.addItem(alignedInfoItem(label: row.resetLabel, value: row.resetValue))
+            }
+        }
+
+        menu.addItem(.separator())
+        if let resets = store.snapshot.bankResets {
+            menu.addItem(alignedInfoItem(label: "重置卡", value: "\(resets.availableCount) 次可用"))
+            menu.addItem(.separator())
+            let credits = resets.availableCredits()
+            for credit in credits {
+                let item = NSMenuItem()
+                let row = MenuInfoRowView(label: credit.expirationValue,
+                                          value: credit.countdownValue() ?? "")
+                item.view = row
+                if let expiresAt = credit.expiresAt {
+                    countdownRows.append((Date(timeIntervalSince1970: expiresAt), "已到期", row))
+                }
+                item.toolTip = credit.title
+                menu.addItem(item)
+            }
+            if resets.availableCount > credits.count {
+                menu.addItem(alignedInfoItem(label: "到期明细", value: "另 \(resets.availableCount - credits.count) 次未提供"))
+            } else if resets.availableCount == 0 {
+                menu.addItem(alignedInfoItem(label: "", value: "暂无可用 重置卡"))
+            }
+        } else {
+            menu.addItem(alignedInfoItem(label: "重置卡", value: "暂未获取"))
         }
 
         if let errorMessage = store.snapshot.errorMessage {
@@ -129,33 +206,19 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(error)
         }
 
-        if store.isRefreshing {
-            menu.addItem(.separator())
-            let refreshing = NSMenuItem(title: "正在刷新...", action: nil, keyEquivalent: "")
-            refreshing.isEnabled = false
-            menu.addItem(refreshing)
-        }
-
         menu.addItem(.separator())
-
-        let lowQuotaAlert = NSMenuItem()
-        let lowQuotaSwitch = LowQuotaSwitchView(isOn: store.lowQuotaAlertEnabled)
-        lowQuotaSwitch.onToggle = { [weak self] isOn in
-            self?.store.setLowQuotaAlertEnabled(isOn)
-            self?.updateStatusView()
-        }
-        lowQuotaAlert.view = lowQuotaSwitch
-        menu.addItem(lowQuotaAlert)
-
-        menu.addItem(.separator())
-
-        let refresh = NSMenuItem(title: "刷新", action: #selector(refresh), keyEquivalent: "r")
-        refresh.target = self
-        menu.addItem(refresh)
 
         let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+
+        let infoRows = menu.items.compactMap { $0.view as? MenuInfoRowView }
+        let labelWidth = infoRows.map(\.measuredLabelWidth).max() ?? 0
+        let valueWidth = infoRows.map(\.measuredValueWidth).max() ?? 0
+        let menuWidth = max(280, labelWidth + valueWidth + 28 + 24)
+        for row in infoRows {
+            row.applyLayout(width: menuWidth, labelWidth: labelWidth)
+        }
     }
 
     private func alignedInfoItem(label: String, value: String) -> NSMenuItem {
@@ -165,20 +228,11 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func shouldHighlightLowQuota(_ remainingPercent: Int?) -> Bool {
-        guard store.lowQuotaAlertEnabled, let remainingPercent else {
+        guard let remainingPercent else {
             return false
         }
 
         return remainingPercent <= 20
-    }
-
-    @objc private func refresh() {
-        Task {
-            await store.refresh()
-            await MainActor.run {
-                self.updateStatusView(force: true)
-            }
-        }
     }
 
     @objc private func quit() {
@@ -197,46 +251,12 @@ private struct StatusRenderRow: Equatable {
     let isLow: Bool
 }
 
-private final class LowQuotaSwitchView: NSView {
-    var onToggle: ((Bool) -> Void)?
-
-    private let label = NSTextField(labelWithString: "低额度提醒")
-    private let toggle = PillSwitchControl()
-
-    init(isOn: Bool) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 230, height: 30))
-
-        label.font = NSFont.systemFont(ofSize: 13)
-        label.textColor = .labelColor
-        label.alignment = .left
-        label.frame = NSRect(x: 14, y: 6, width: 110, height: 18)
-
-        toggle.isOn = isOn
-        toggle.syncVisualState()
-        toggle.onToggle = { [weak self] isOn in
-            self?.onToggle?(isOn)
-        }
-        toggle.frame = NSRect(x: 170, y: 5, width: 46, height: 20)
-
-        addSubview(label)
-        addSubview(toggle)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        toggle.toggleAnimated()
-    }
-}
-
 private final class MenuInfoRowView: NSView {
     private let labelField = NSTextField(labelWithString: "")
     private let valueField = NSTextField(labelWithString: "")
 
     init(label: String, value: String) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 230, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 28))
 
         configure(labelField, alignment: .left)
         configure(valueField, alignment: .right)
@@ -244,8 +264,7 @@ private final class MenuInfoRowView: NSView {
         labelField.stringValue = label
         valueField.stringValue = value
 
-        labelField.frame = NSRect(x: 14, y: 5, width: 86, height: 18)
-        valueField.frame = NSRect(x: 92, y: 5, width: 124, height: 18)
+        applyLayout(width: 280, labelWidth: measuredLabelWidth)
 
         addSubview(labelField)
         addSubview(valueField)
@@ -253,6 +272,24 @@ private final class MenuInfoRowView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    var measuredLabelWidth: CGFloat { measuredWidth(labelField) }
+    var measuredValueWidth: CGFloat { measuredWidth(valueField) }
+
+    private func measuredWidth(_ field: NSTextField) -> CGFloat {
+        ceil(NSString(string: field.stringValue).size(withAttributes: [.font: field.font!]).width) + 4
+    }
+
+    func applyLayout(width: CGFloat, labelWidth: CGFloat) {
+        setFrameSize(NSSize(width: width, height: 28))
+        labelField.frame = NSRect(x: 14, y: 5, width: labelWidth, height: 18)
+        let valueX = 14 + labelWidth + 24
+        valueField.frame = NSRect(x: valueX, y: 5, width: max(0, width - valueX - 14), height: 18)
+    }
+
+    func updateValue(_ value: String) {
+        valueField.stringValue = value
     }
 
     private func configure(_ field: NSTextField, alignment: NSTextAlignment) {
@@ -264,112 +301,6 @@ private final class MenuInfoRowView: NSView {
         field.drawsBackground = false
         field.isBordered = false
         field.lineBreakMode = .byClipping
-    }
-}
-
-private final class PillSwitchControl: NSControl {
-    var onToggle: ((Bool) -> Void)?
-
-    var isOn = false
-
-    private var animationProgress: CGFloat = 0
-    private var animationTimer: Timer?
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-
-        let trackRect = bounds.insetBy(dx: 1, dy: 1)
-        let trackPath = NSBezierPath(roundedRect: trackRect, xRadius: trackRect.height / 2, yRadius: trackRect.height / 2)
-        let trackColor = blendedColor(
-            from: NSColor(calibratedWhite: 0.58, alpha: 1),
-            to: .systemRed,
-            progress: animationProgress
-        )
-        trackColor.setFill()
-        trackPath.fill()
-
-        let knobDiameter = trackRect.height - 4
-        let offX = trackRect.minX + 2
-        let onX = trackRect.maxX - knobDiameter - 2
-        let knobX = offX + (onX - offX) * animationProgress
-        let knobRect = NSRect(x: knobX, y: trackRect.minY + 2, width: knobDiameter, height: knobDiameter)
-        let knobPath = NSBezierPath(ovalIn: knobRect)
-        NSColor.white.setFill()
-        knobPath.fill()
-        NSColor(calibratedWhite: 0, alpha: 0.12).setStroke()
-        knobPath.lineWidth = 0.5
-        knobPath.stroke()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        toggleAnimated()
-    }
-
-    func toggleAnimated() {
-        setOn(!isOn, animated: true)
-        onToggle?(isOn)
-    }
-
-    func syncVisualState() {
-        animationTimer?.invalidate()
-        animationProgress = isOn ? 1 : 0
-        needsDisplay = true
-    }
-
-    private func setOn(_ newValue: Bool, animated: Bool) {
-        animationTimer?.invalidate()
-
-        guard animated else {
-            isOn = newValue
-            animationProgress = newValue ? 1 : 0
-            needsDisplay = true
-            return
-        }
-
-        let start = animationProgress
-        let end: CGFloat = newValue ? 1 : 0
-        isOn = newValue
-        let startTime = Date()
-        let duration: TimeInterval = 0.16
-
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-
-            let elapsed = Date().timeIntervalSince(startTime)
-            let t = min(1, elapsed / duration)
-            let eased = 1 - pow(1 - t, 3)
-            self.animationProgress = start + (end - start) * eased
-            self.needsDisplay = true
-
-            if t >= 1 {
-                timer.invalidate()
-                self.animationProgress = end
-                self.needsDisplay = true
-            }
-        }
-        animationTimer = timer
-        RunLoop.current.add(timer, forMode: .eventTracking)
-        RunLoop.current.add(timer, forMode: .common)
-    }
-
-    private func blendedColor(from: NSColor, to: NSColor, progress: CGFloat) -> NSColor {
-        let fromRGB = from.usingColorSpace(.deviceRGB) ?? from
-        let toRGB = to.usingColorSpace(.deviceRGB) ?? to
-        let p = max(0, min(1, progress))
-
-        return NSColor(
-            calibratedRed: fromRGB.redComponent + (toRGB.redComponent - fromRGB.redComponent) * p,
-            green: fromRGB.greenComponent + (toRGB.greenComponent - fromRGB.greenComponent) * p,
-            blue: fromRGB.blueComponent + (toRGB.blueComponent - fromRGB.blueComponent) * p,
-            alpha: fromRGB.alphaComponent + (toRGB.alphaComponent - fromRGB.alphaComponent) * p
-        )
     }
 }
 

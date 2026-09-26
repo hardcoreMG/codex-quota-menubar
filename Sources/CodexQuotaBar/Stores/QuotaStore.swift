@@ -3,20 +3,12 @@ import Combine
 
 @MainActor
 final class QuotaStore: ObservableObject {
-    private static let lowQuotaAlertKey = "lowQuotaAlertEnabled"
     private let client = CodexAppServerClient()
 
     @Published var snapshot: QuotaSnapshot = .empty
     @Published var isRefreshing = false
-    @Published var lowQuotaAlertEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(lowQuotaAlertEnabled, forKey: Self.lowQuotaAlertKey)
-        }
-    }
 
     init() {
-        lowQuotaAlertEnabled = UserDefaults.standard.bool(forKey: Self.lowQuotaAlertKey)
-
         Task {
             while !Task.isCancelled {
                 await refresh()
@@ -44,7 +36,4 @@ final class QuotaStore: ObservableObject {
         }
     }
 
-    func setLowQuotaAlertEnabled(_ isEnabled: Bool) {
-        lowQuotaAlertEnabled = isEnabled
-    }
 }
