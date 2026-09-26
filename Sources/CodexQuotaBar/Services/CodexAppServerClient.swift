@@ -18,6 +18,7 @@ struct CodexAppServerClient {
                 fiveHourResetAt: fiveHourWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
                 weeklyUsedPercent: weeklyWindow?.usedPercent,
                 weeklyResetAt: weeklyWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                bankResets: rateLimits.rateLimitResetCredits,
                 errorMessage: nil
             )
         }.value

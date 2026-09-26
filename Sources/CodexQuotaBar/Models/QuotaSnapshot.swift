@@ -13,6 +13,7 @@ struct QuotaSnapshot {
     var fiveHourResetAt: Date?
     var weeklyUsedPercent: Int?
     var weeklyResetAt: Date?
+    var bankResets: RateLimitResetCreditsSummary?
     var errorMessage: String?
 
     static let empty = QuotaSnapshot()
