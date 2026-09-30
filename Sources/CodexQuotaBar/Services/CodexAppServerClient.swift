@@ -1,12 +1,20 @@
 import AppKit
 import Foundation
+import OSLog
 
 struct CodexAppServerClient {
     private let decoder = JSONDecoder()
 
     func readQuota() async throws -> QuotaSnapshot {
         try await Task.detached(priority: .userInitiated) {
-            let responses = try runAppServerRequests()
+            let responses: [JSONRPCResponse]
+            do {
+                responses = try runAppServerRequests()
+            } catch CodexAppServerError.timeout {
+                // Retry one read after a transient network timeout with a fresh server.
+                try await Task.sleep(for: .seconds(1))
+                responses = try runAppServerRequests()
+            }
             let rateLimits: CodexRateLimitResponse = try decodeResult(id: 2, from: responses)
 
             let codexLimit = rateLimits.codexLimit
@@ -41,10 +49,17 @@ struct CodexAppServerClient {
     }
 }
 
-private func runAppServerRequests() throws -> [JSONRPCResponse] {
+// Separate startup from the network-backed quota request so slow startup does not
+// consume the quota request's deadline. Injectable process settings support regression tests.
+func runAppServerRequests(
+    executableURL: URL? = nil,
+    arguments: [String] = ["app-server", "--stdio", "--disable", "remote_control"],
+    initializationTimeout: TimeInterval = 15,
+    quotaTimeout: TimeInterval = 30
+) throws -> [JSONRPCResponse] {
     let process = Process()
-    process.executableURL = try codexExecutableURL()
-    process.arguments = ["app-server", "--stdio", "--disable", "remote_control"]
+    process.executableURL = try executableURL ?? codexExecutableURL()
+    process.arguments = arguments
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
     let stdin = Pipe()
@@ -54,97 +69,113 @@ private func runAppServerRequests() throws -> [JSONRPCResponse] {
     process.standardOutput = stdout
     process.standardError = stderr
 
-    try process.run()
-
-    let lock = NSLock()
-    let semaphore = DispatchSemaphore(value: 0)
-    var outputBuffer = ""
-    var responses: [JSONRPCResponse] = []
-    var stderrText = ""
-
+    let state = AppServerOutput()
+    let logger = Logger(subsystem: "com.kevinchin.CodexQuotaBar", category: "app-server")
     stdout.fileHandleForReading.readabilityHandler = { handle in
         let data = handle.availableData
-        guard !data.isEmpty else {
-            return
-        }
-
-        let chunk = String(data: data, encoding: .utf8) ?? ""
-
-        lock.lock()
-        outputBuffer += chunk
-
-        while let newline = outputBuffer.firstIndex(of: "\n") {
-            let line = String(outputBuffer[..<newline])
-            outputBuffer.removeSubrange(...newline)
-
-            if let data = line.data(using: .utf8),
-               let response = try? JSONDecoder().decode(JSONRPCResponse.self, from: data) {
-                responses.append(response)
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        if data.isEmpty {
+            state.outputClosed = true
+            handle.readabilityHandler = nil
+        } else {
+            state.buffer.append(data)
+            while let newline = state.buffer.firstIndex(of: 0x0A) {
+                let line = state.buffer[..<newline]
+                if let response = try? JSONDecoder().decode(JSONRPCResponse.self, from: line) {
+                    state.responses.append(response)
+                }
+                state.buffer.removeSubrange(...newline)
             }
         }
-
-        let hasRateLimits = responses.contains { $0.id == 2 }
-        lock.unlock()
-
-        if hasRateLimits {
-            semaphore.signal()
-        }
+        state.condition.broadcast()
     }
-
     stderr.fileHandleForReading.readabilityHandler = { handle in
         let data = handle.availableData
-        guard !data.isEmpty else {
-            return
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        if data.isEmpty {
+            handle.readabilityHandler = nil
+        } else {
+            // Bound diagnostics even if a server repeatedly logs while waiting.
+            state.stderrData.append(data)
+            state.stderrData = Data(state.stderrData.suffix(4096))
         }
-
-        lock.lock()
-        stderrText += String(data: data, encoding: .utf8) ?? ""
-        lock.unlock()
     }
 
-    let requests = [
-        JSONRPCRequest(
-            id: 1,
-            method: "initialize",
-            params: [
-                "clientInfo": .object([
-                    "name": .string("codex-quota-menubar"),
-                    "version": .string("0.1.4")
-                ]),
-                "capabilities": .object([
-                    "experimentalApi": .bool(true)
-                ])
-            ]
-        ),
-        JSONRPCRequest(id: 2, method: "account/rateLimits/read", params: [:])
-    ]
+    defer {
+        stdout.fileHandleForReading.readabilityHandler = nil
+        stderr.fileHandleForReading.readabilityHandler = nil
+        try? stdin.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
+        // Bound shutdown too: an unresponsive child must not accumulate per refresh.
+        if process.isRunning {
+            let deadline = Date().addingTimeInterval(1)
+            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+        try? stdout.fileHandleForReading.close()
+        try? stderr.fileHandleForReading.close()
+    }
+    try process.run()
 
-    for request in requests {
-        let data = try JSONEncoder().encode(request)
-        stdin.fileHandleForWriting.write(data)
-        stdin.fileHandleForWriting.write(Data([0x0A]))
+    func send(_ request: JSONRPCRequest) throws {
+        var data = try JSONEncoder().encode(request)
+        data.append(0x0A)
+        try stdin.fileHandleForWriting.write(contentsOf: data)
     }
 
-    let result = semaphore.wait(timeout: .now() + 15)
-
-    stdout.fileHandleForReading.readabilityHandler = nil
-    stderr.fileHandleForReading.readabilityHandler = nil
-    stdin.fileHandleForWriting.closeFile()
-
-    if process.isRunning {
-        process.terminate()
+    func waitForResponse(id: Int, stage: String, timeout: TimeInterval) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        while true {
+            if let response = state.responses.first(where: { $0.id == id }) {
+                if let error = response.error { throw CodexAppServerError.server(error.message) }
+                guard response.result != nil else { throw CodexAppServerError.missingResult(id) }
+                return
+            }
+            if state.outputClosed {
+                let diagnostics = String(decoding: state.stderrData, as: UTF8.self)
+                logger.error("App-server exited during \(stage, privacy: .public): \(diagnostics, privacy: .private)")
+                throw CodexAppServerError.processFailed("Codex app-server exited during \(stage)")
+            }
+            if Date() >= deadline {
+                let diagnostics = String(decoding: state.stderrData, as: UTF8.self)
+                logger.error("App-server timed out during \(stage, privacy: .public): \(diagnostics, privacy: .private)")
+                throw CodexAppServerError.timeout("Codex app-server timed out during \(stage) (\(Int(timeout))s)")
+            }
+            _ = state.condition.wait(until: deadline)
+        }
     }
 
-    if result == .timedOut {
-        let message = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
-        throw CodexAppServerError.timeout(message.isEmpty ? nil : message)
-    }
+    try send(JSONRPCRequest(
+        id: 1,
+        method: "initialize",
+        params: [
+            "clientInfo": .object([
+                "name": .string("codex-quota-menubar"),
+                "version": .string("0.1.5")
+            ]),
+            "capabilities": .object(["experimentalApi": .bool(true)])
+        ]
+    ))
+    try waitForResponse(id: 1, stage: "initialize", timeout: initializationTimeout)
+    try send(JSONRPCRequest(id: nil, method: "initialized", params: [:]))
+    try send(JSONRPCRequest(id: 2, method: "account/rateLimits/read", params: [:]))
+    try waitForResponse(id: 2, stage: "account/rateLimits/read", timeout: quotaTimeout)
 
-    lock.lock()
-    let finalResponses = responses
-    lock.unlock()
+    state.condition.lock()
+    defer { state.condition.unlock() }
+    return state.responses
+}
 
-    return finalResponses
+private final class AppServerOutput {
+    let condition = NSCondition()
+    var buffer = Data()
+    var responses: [JSONRPCResponse] = []
+    var stderrData = Data()
+    var outputClosed = false
 }
 
 private func codexExecutableURL() throws -> URL {
@@ -174,12 +205,12 @@ private func codexExecutableURL() throws -> URL {
 
 private struct JSONRPCRequest: Encodable {
     let jsonrpc = "2.0"
-    let id: Int
+    let id: Int?
     let method: String
     let params: [String: JSONValue]
 }
 
-private struct JSONRPCResponse: Decodable {
+struct JSONRPCResponse: Decodable {
     let id: Int?
     let result: Data?
     let error: JSONRPCError?
@@ -204,7 +235,7 @@ private struct JSONRPCResponse: Decodable {
     }
 }
 
-private struct JSONRPCError: Decodable {
+struct JSONRPCError: Decodable {
     let message: String
 }
 
