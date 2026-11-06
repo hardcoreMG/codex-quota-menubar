@@ -2,6 +2,20 @@ import XCTest
 @testable import CodexQuotaBar
 
 final class BankResetTests: XCTestCase {
+    func testResetCreditTurnsRedOnlyBelowThreeDays() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        func credit(after seconds: TimeInterval) -> RateLimitResetCredit {
+            RateLimitResetCredit(id: "test", status: "available",
+                                 expiresAt: now.timeIntervalSince1970 + seconds, title: nil)
+        }
+        XCTAssertFalse(credit(after: 3 * 86_400).expiresWithinThreeDays(at: now))
+        XCTAssertFalse(credit(after: 3 * 86_400 + 1).expiresWithinThreeDays(at: now))
+        XCTAssertTrue(credit(after: 3 * 86_400 - 1).expiresWithinThreeDays(at: now))
+        XCTAssertTrue(credit(after: 0).expiresWithinThreeDays(at: now))
+        XCTAssertFalse(RateLimitResetCredit(id: "unlimited", status: "available", expiresAt: nil, title: nil)
+            .expiresWithinThreeDays(at: now))
+    }
+
     func testSortsAvailableCreditsAndExcludesExpiredOrRedeemedCredits() throws {
         let json = #"{"availableCount":3,"credits":[{"id":"no-expiry","status":"available","expiresAt":null},{"id":"later","status":"available","expiresAt":3000},{"id":"earlier","status":"available","expiresAt":2000},{"id":"expired","status":"available","expiresAt":1000},{"id":"used","status":"redeemed","expiresAt":4000}]}"#
         let summary = try JSONDecoder().decode(RateLimitResetCreditsSummary.self, from: Data(json.utf8))

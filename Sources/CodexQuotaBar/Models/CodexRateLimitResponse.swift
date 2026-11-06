@@ -62,6 +62,11 @@ struct RateLimitResetCredit: Decodable {
     let expiresAt: TimeInterval?
     let title: String?
 
+    func expiresWithinThreeDays(at now: Date = Date()) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt - now.timeIntervalSince1970 < 3 * 86_400
+    }
+
     func countdownValue(at date: Date = Date()) -> String? {
         guard let expiresAt else { return nil }
         let remaining = expiresAt - date.timeIntervalSince1970
