@@ -1,80 +1,83 @@
-# 发布说明
+# 维护与发布
 
-项目名称：Codex 额度菜单显示小工具
+项目名称：Codex / Grok Bot 额度菜单显示小工具。原作者：嘉文钱；本仓库维护者：hardcoreMG。Swift 工程名及应用包名保留为 `CodexQuotaBar`。
 
-原作者：嘉文钱
+## 日常维护
 
-本仓库维护者：hardcoreMG
+日常功能开发和修复默认在本仓库 `main` 分支进行，验证后提交并推送到 `origin/main`。提交按功能或修复拆分，采用 Conventional Commits，描述和正文使用中文。
 
-工程名：`CodexQuotaBar`
+- `origin`：`hardcoreMG/codex-quota-menubar`
+- `upstream`：`kevinchin12/codex-quota-menubar`
 
-## 推荐发布方式
+用 `git fetch upstream` 查看上游更新，审查后按需合并并重新验证。普通开发改动记入 `CHANGELOG.md` 的“未发布”；正式发布时再更新打包脚本的版本号、README 中的产物名称和 CHANGELOG，并创建对应版本 tag。
 
-GitHub 仓库默认只发布源码，不发布预构建的 `.app` 或 `.dmg`。
+## 构建验证
 
-原因：未经过 Apple Developer ID 签名和 notarization 公证的 macOS 二进制文件，会被 Gatekeeper 识别为不可信来源。别人直接下载后可能无法正常打开。
-
-推荐用户自己 clone 源码后，在本机运行：
+在仓库根目录运行：
 
 ```bash
-./script/build_and_run.sh
+swift test
+swift build -c release
+bash -n script/build_and_run.sh script/package_dmg.sh
+./script/build_and_run.sh --verify
 ```
 
-如果用户想生成自用安装包：
+`--verify` 会重启 `dist/CodexQuotaBar.app` 并检查进程存在；菜单布局、点击和系统配色需要在应用中检查。
+
+自动化测试覆盖：
+
+- Codex 额度窗口映射、app-server 初始化顺序、分段响应、提前退出及超时阶段。
+- Grok 当前账号缓存隔离、登录状态、schema、长缓存键、过期时间及试用额度。
+- 单独安装、同时安装、均未安装以及安装状态变化时的数据读取。
+- 单侧失败或仍在等待时，另一侧能独立更新。
+- 今日预算结转、本机零点增加份额、最多七份、颜色阈值与重置卡 72 小时边界。
+
+## 界面验收
+
+| 场景 | 预期 |
+| --- | --- |
+| 两者均已安装 | 左侧 Codex 图标，右侧 Grok 图标；下拉菜单单列，两个应用区域以粗横线分隔 |
+| 仅安装其中一个 | 只显示对应应用的额度和菜单项 |
+| 两者均未安装 | 隐藏菜单栏项 |
+| 有周额度及重置时间 | 上行 `D` 显示今日剩余，下行 `W` 显示周剩余 |
+| Codex 同时有 5 小时和周额度 | 菜单栏显示 `D` / `W`；悬停保留 `5H` 剩余，菜单保留其刷新时间 |
+| Codex 只有 5 小时额度 / Grok 试用 | 显示对应 `5H` / `试用`，不推算日预算 |
+| 今日剩余 51% / 50% / 20% / 19% | 整行依次为绿色 / 默认 / 默认 / 红色 |
+| 周剩余 20% | `W` 胶囊标红 |
+| 重置卡距到期 72 小时 / 小于 72 小时 | 前者默认颜色，后者日期和倒计时整行标红 |
+| Grok 缓存没有更新 | “上次刷新”保持原查询时间；过期后额度显示 `--` 及提示 |
+| 菜单展开超过一分钟 | 额度和倒计时继续更新 |
+| 浅色、深色菜单栏 | 默认文字跟随系统前景色，应用图标和红绿提醒清晰可见 |
+
+## 构建自用 DMG
 
 ```bash
 ./script/package_dmg.sh
 ```
 
-生成产物：
+当前输出：
 
 ```text
+dist/CodexQuotaBar.app
 dist/CodexQuotaBar-0.1.5.dmg
 ```
 
-这个 DMG 默认是 ad-hoc 签名，只适合本机自用或开发测试。
-
-## 本地验证
-
-```bash
-open dist/CodexQuotaBar.app
-pgrep -fl CodexQuotaBar
-```
-
-Plus 账户的菜单栏应该显示：
+脚本使用 release 构建和 ad-hoc 签名。两个构建脚本都会把 SwiftPM 的 `CodexQuotaBar_CodexQuotaBar.bundle` 复制到 `.app/Contents/Resources/`，其中包含 Codex 和 Grok 菜单栏图标。检查应用包时应确认这两个文件存在：
 
 ```text
-5H <percent>
-W  <percent>
+Contents/Resources/CodexQuotaBar_CodexQuotaBar.bundle/Contents/Resources/CodexProvider.png
+Contents/Resources/CodexQuotaBar_CodexQuotaBar.bundle/Contents/Resources/GrokProvider.icns
 ```
 
-Pro 账户只显示周额度：
+安装或升级时，先退出旧版，再将完整 `.app` 复制到 `/Applications` 并打开。不要只替换可执行文件。
 
-```text
-W  <percent>
-```
+## 对外分发
 
-打开菜单后检查：
+GitHub 仓库默认发布源码，用户 clone 后在自己的 Mac 上构建。ad-hoc 签名的 DMG 适合本机自用或开发测试；其他用户下载后可能被 Gatekeeper 拦截。
 
-- Plus 显示 `5H 刷新` 和 `周额度`；Pro 只显示 `周额度`，时间精确到分钟。
-- 低额度提醒默认启用，低于或等于 20% 的额度胶囊变红。
-- 深色和浅色菜单栏下，文字和胶囊会跟随系统菜单栏前景色并保持清晰可读。
+正式分发安装包前：
 
-## 如果要发布正式安装包
-
-正式分发 `.dmg` 前需要：
-
-1. 使用 Apple Developer ID Application 证书签名 `.app`。
-2. 开启 hardened runtime。
-3. 使用 Apple Developer ID 签名 `.dmg`。
-4. 提交 Apple notarization。
-5. notarization 通过后执行 `xcrun stapler staple`。
-6. 用 `spctl` 做 Gatekeeper 验证。
-
-未完成以上步骤时，不建议把 `.dmg` 上传到 GitHub Releases 作为面向其他用户的安装包。
-
-## 维护流程
-
-日常功能开发和修复默认直接在本仓库 `main` 分支进行，验证后提交并推送到 `origin/main`。发布前运行 `swift test` 和 `swift build -c release`，更新打包版本与 CHANGELOG，再创建对应版本 tag。
-
-`origin` 指向 `hardcoreMG/codex-quota-menubar`；`upstream` 指向 `kevinchin12/codex-quota-menubar`。使用 `git fetch upstream` 查看上游更新，审查后按需合并，重新验证。
+1. 使用 Apple Developer ID Application 证书签名 `.app`，开启 hardened runtime。
+2. 使用 Apple Developer ID 签名 `.dmg`。
+3. 提交 Apple notarization，通过后执行 `xcrun stapler staple`。
+4. 用 `spctl` 验证 Gatekeeper 接受情况，并在目标 Mac 上完成启动和菜单验收。
