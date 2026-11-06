@@ -29,10 +29,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 private final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let store = QuotaStore()
-    private let lowQuotaOverlay = LowQuotaStatusOverlayView()
+    private let statusOverlay = QuotaStatusOverlayView()
     private var cancellable: AnyCancellable?
     private var countdownTimer: Timer?
-    private var countdownRows: [(deadline: Date, expiredValue: String?, row: MenuInfoRowView)] = []
+    private var countdownRows: [(deadline: Date, expiredValue: String?, credit: RateLimitResetCredit?, row: MenuInfoRowView)] = []
     private var isMenuOpen = false
     private var lastRenderState: StatusRenderState?
 
@@ -45,9 +45,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.imageScaling = .scaleNone
         if let button = statusItem.button {
-            lowQuotaOverlay.frame = button.bounds
-            lowQuotaOverlay.autoresizingMask = [.width, .height]
-            button.addSubview(lowQuotaOverlay)
+            statusOverlay.frame = button.bounds
+            statusOverlay.autoresizingMask = [.width, .height]
+            button.addSubview(statusOverlay)
         }
         updateStatusView()
 
@@ -92,27 +92,33 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func updateStatusView(force: Bool = false) {
-        let rows = store.snapshot.displayRows.map { row in
-            StatusRenderRow(
-                badge: row.badge,
-                value: row.value,
-                isLow: shouldHighlightLowQuota(row.remainingPercent)
-            )
+        let now = Date()
+        let groups = store.installedProviders.map { provider in
+            StatusRenderGroup(provider: provider, rows: provider == .codex
+                ? QuotaStatusPresentation.codexRows(store.snapshot, at: now)
+                : QuotaStatusPresentation.grokRows(store.grokSnapshot, at: now))
         }
-        let renderState = StatusRenderState(
-            rows: rows,
-            toolTip: store.snapshot.menuTitle
-        )
+        let toolTip = groups.map { group in
+            let title = group.provider == .codex ? "Codex \(store.snapshot.menuTitle)" : store.grokSnapshot.menuTitle
+            return title + (group.rows.first(where: { $0.badge == "D" }).map { " | 今日 \($0.value)" } ?? "")
+        }.joined(separator: "\n")
+        let renderState = StatusRenderState(groups: groups, toolTip: toolTip)
+        statusItem.isVisible = !groups.isEmpty
+        guard !groups.isEmpty else {
+            lastRenderState = renderState
+            return
+        }
 
         guard force || renderState != lastRenderState else {
             return
         }
 
-        let image = QuotaStatusImageRenderer.render(rows: renderState.rows)
+        let image = QuotaStatusImageRenderer.render(groups: renderState.groups)
         statusItem.button?.image = image
         statusItem.button?.toolTip = renderState.toolTip
+        statusItem.button?.setAccessibilityLabel(renderState.toolTip)
         statusItem.length = image.size.width
-        lowQuotaOverlay.rows = renderState.rows
+        statusOverlay.groups = renderState.groups
         lastRenderState = renderState
     }
 
@@ -154,6 +160,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         for entry in countdownRows {
             let value = entry.deadline <= now ? entry.expiredValue : nil
             entry.row.updateValue(value ?? QuotaCountdown.string(until: entry.deadline, at: now))
+            if let credit = entry.credit {
+                entry.row.updateWarning(credit.expiresWithinThreeDays(at: now))
+            }
         }
     }
 
@@ -161,49 +170,79 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         countdownRows.removeAll()
         menu.removeAllItems()
 
-        for row in store.snapshot.displayRows {
-            if row.badge == "W", let deadline = store.snapshot.weeklyResetAt {
+        if store.installedProviders.contains(.codex) {
+            for row in store.snapshot.displayRows {
+                if row.badge == "W", let deadline = store.snapshot.weeklyResetAt {
+                    let item = NSMenuItem()
+                    let view = MenuInfoRowView(label: "\(row.resetLabel)  \(row.resetValue)",
+                                               value: QuotaCountdown.string(until: deadline))
+                    item.view = view
+                    countdownRows.append((deadline, nil, nil, view))
+                    menu.addItem(item)
+                } else {
+                    menu.addItem(alignedInfoItem(label: row.resetLabel, value: row.resetValue))
+                }
+            }
+
+            menu.addItem(.separator())
+            if let resets = store.snapshot.bankResets {
+                menu.addItem(alignedInfoItem(label: "重置卡", value: "\(resets.availableCount) 次可用"))
+                menu.addItem(.separator())
+                let credits = resets.availableCredits()
+                for credit in credits {
+                    let item = NSMenuItem()
+                    let row = MenuInfoRowView(label: credit.expirationValue,
+                                              value: credit.countdownValue() ?? "",
+                                              isWarning: credit.expiresWithinThreeDays())
+                    item.view = row
+                    if let expiresAt = credit.expiresAt {
+                        countdownRows.append((Date(timeIntervalSince1970: expiresAt), "已到期", credit, row))
+                    }
+                    item.toolTip = credit.title
+                    menu.addItem(item)
+                }
+                if resets.availableCount > credits.count {
+                    menu.addItem(alignedInfoItem(label: "到期明细", value: "另 \(resets.availableCount - credits.count) 次未提供"))
+                } else if resets.availableCount == 0 {
+                    menu.addItem(alignedInfoItem(label: "", value: "暂无可用 重置卡"))
+                }
+            } else {
+                menu.addItem(alignedInfoItem(label: "重置卡", value: "暂未获取"))
+            }
+
+            if let errorMessage = store.snapshot.errorMessage {
+                menu.addItem(.separator())
+                let error = NSMenuItem(title: "错误 \(errorMessage)", action: nil, keyEquivalent: "")
+                error.isEnabled = false
+                menu.addItem(error)
+            }
+        }
+
+        if store.installedProviders.contains(.grok) {
+            if !menu.items.isEmpty {
+                let separator = NSMenuItem()
+                separator.view = ProviderSeparatorView(frame: NSRect(x: 0, y: 0, width: 280, height: 12))
+                menu.addItem(separator)
+            }
+            let grok = store.grokSnapshot
+            if let deadline = grok.resetAt {
                 let item = NSMenuItem()
-                let view = MenuInfoRowView(label: "\(row.resetLabel)  \(row.resetValue)",
-                                           value: QuotaCountdown.string(until: deadline))
-                item.view = view
-                countdownRows.append((deadline, nil, view))
+                let row = MenuInfoRowView(label: "Grok \(grok.displayRow.resetLabel)  \(grok.displayRow.resetValue)",
+                                          value: QuotaCountdown.string(until: deadline))
+                item.view = row
+                countdownRows.append((deadline, nil, nil, row))
                 menu.addItem(item)
             } else {
-                menu.addItem(alignedInfoItem(label: row.resetLabel, value: row.resetValue))
+                menu.addItem(alignedInfoItem(label: "Grok \(grok.displayRow.resetLabel)", value: "--"))
             }
-        }
-
-        menu.addItem(.separator())
-        if let resets = store.snapshot.bankResets {
-            menu.addItem(alignedInfoItem(label: "重置卡", value: "\(resets.availableCount) 次可用"))
-            menu.addItem(.separator())
-            let credits = resets.availableCredits()
-            for credit in credits {
-                let item = NSMenuItem()
-                let row = MenuInfoRowView(label: credit.expirationValue,
-                                          value: credit.countdownValue() ?? "")
-                item.view = row
-                if let expiresAt = credit.expiresAt {
-                    countdownRows.append((Date(timeIntervalSince1970: expiresAt), "已到期", row))
-                }
-                item.toolTip = credit.title
-                menu.addItem(item)
+            menu.addItem(alignedInfoItem(label: "Grok 上次刷新", value: grok.updatedAt.map {
+                DateFormatter.quotaHour.string(from: $0)
+            } ?? "--"))
+            if let errorMessage = grok.errorMessage {
+                let error = NSMenuItem(title: "Grok 错误 \(errorMessage)", action: nil, keyEquivalent: "")
+                error.isEnabled = false
+                menu.addItem(error)
             }
-            if resets.availableCount > credits.count {
-                menu.addItem(alignedInfoItem(label: "到期明细", value: "另 \(resets.availableCount - credits.count) 次未提供"))
-            } else if resets.availableCount == 0 {
-                menu.addItem(alignedInfoItem(label: "", value: "暂无可用 重置卡"))
-            }
-        } else {
-            menu.addItem(alignedInfoItem(label: "重置卡", value: "暂未获取"))
-        }
-
-        if let errorMessage = store.snapshot.errorMessage {
-            menu.addItem(.separator())
-            let error = NSMenuItem(title: "错误 \(errorMessage)", action: nil, keyEquivalent: "")
-            error.isEnabled = false
-            menu.addItem(error)
         }
 
         menu.addItem(.separator())
@@ -219,6 +258,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         for row in infoRows {
             row.applyLayout(width: menuWidth, labelWidth: labelWidth)
         }
+        for separator in menu.items.compactMap({ $0.view as? ProviderSeparatorView }) {
+            separator.setFrameSize(NSSize(width: menuWidth, height: 12))
+        }
     }
 
     private func alignedInfoItem(label: String, value: String) -> NSMenuItem {
@@ -227,35 +269,24 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         return item
     }
 
-    private func shouldHighlightLowQuota(_ remainingPercent: Int?) -> Bool {
-        guard let remainingPercent else {
-            return false
-        }
-
-        return remainingPercent <= 20
-    }
-
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 }
 
-private struct StatusRenderState: Equatable {
-    let rows: [StatusRenderRow]
-    let toolTip: String
-}
-
-private struct StatusRenderRow: Equatable {
-    let badge: String
-    let value: String
-    let isLow: Bool
+private final class ProviderSeparatorView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor.separatorColor.setFill()
+        NSRect(x: 14, y: 5, width: bounds.width - 28, height: 2).fill()
+    }
 }
 
 private final class MenuInfoRowView: NSView {
     private let labelField = NSTextField(labelWithString: "")
     private let valueField = NSTextField(labelWithString: "")
 
-    init(label: String, value: String) {
+    init(label: String, value: String, isWarning: Bool = false) {
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 28))
 
         configure(labelField, alignment: .left)
@@ -263,6 +294,7 @@ private final class MenuInfoRowView: NSView {
 
         labelField.stringValue = label
         valueField.stringValue = value
+        updateWarning(isWarning)
 
         applyLayout(width: 280, labelWidth: measuredLabelWidth)
 
@@ -292,6 +324,11 @@ private final class MenuInfoRowView: NSView {
         valueField.stringValue = value
     }
 
+    func updateWarning(_ isWarning: Bool) {
+        labelField.textColor = isWarning ? .systemRed : .labelColor
+        valueField.textColor = isWarning ? .systemRed : .labelColor
+    }
+
     private func configure(_ field: NSTextField, alignment: NSTextAlignment) {
         field.font = NSFont.systemFont(ofSize: 13)
         field.textColor = .labelColor
@@ -301,247 +338,5 @@ private final class MenuInfoRowView: NSView {
         field.drawsBackground = false
         field.isBordered = false
         field.lineBreakMode = .byClipping
-    }
-}
-
-private enum QuotaStatusLayout {
-    static let horizontalPadding: CGFloat = 2
-    static let badgeGap: CGFloat = 4
-    static let inlineBadgeSize = NSSize(width: 17, height: 8)
-    static let stackedBadgeSize = NSSize(width: 17, height: 8)
-    static let inlineValueFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-    static let stackedValueFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-    static let inlineBadgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
-    static let stackedBadgeFont = NSFont.systemFont(ofSize: 7.5, weight: .medium)
-
-    static func stackedBadgeRect(in bounds: NSRect) -> NSRect {
-        NSRect(
-            x: pixelAligned((bounds.width - stackedBadgeSize.width) / 2),
-            y: 0.5,
-            width: stackedBadgeSize.width,
-            height: stackedBadgeSize.height
-        )
-    }
-
-    static func inlineBadgeRect(rowY: CGFloat) -> NSRect {
-        NSRect(
-            x: horizontalPadding,
-            y: rowY + 2,
-            width: inlineBadgeSize.width,
-            height: inlineBadgeSize.height
-        )
-    }
-
-    static func rowYOffsets(count: Int) -> [CGFloat] {
-        count == 1 ? [5] : Array(0..<count).map { CGFloat($0 * 10) }
-    }
-
-    private static func pixelAligned(_ value: CGFloat) -> CGFloat {
-        (value * 2).rounded() / 2
-    }
-}
-
-private enum QuotaStatusDrawing {
-    static func drawBadge(
-        text: String,
-        in rect: NSRect,
-        font: NSFont,
-        fillColor: NSColor,
-        textColor: NSColor,
-        clearsText: Bool
-    ) {
-        fillColor.setFill()
-        NSBezierPath(
-            roundedRect: rect,
-            xRadius: rect.height / 2,
-            yRadius: rect.height / 2
-        ).fill()
-
-        if clearsText {
-            NSGraphicsContext.current?.compositingOperation = .clear
-        }
-
-        drawText(text, in: rect, font: font, color: textColor, alignment: .center, verticallyCentered: true)
-
-        if clearsText {
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
-        }
-    }
-
-    static func drawText(
-        _ text: String,
-        in bounds: NSRect,
-        font: NSFont,
-        color: NSColor,
-        alignment: NSTextAlignment,
-        verticallyCentered: Bool = false
-    ) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
-        ]
-        var drawingRect = bounds
-
-        if verticallyCentered {
-            let textHeight = NSString(string: text).size(withAttributes: attributes).height
-            drawingRect.origin.y = bounds.midY - textHeight / 2
-            drawingRect.size.height = textHeight
-        }
-
-        NSString(string: text).draw(in: drawingRect, withAttributes: attributes)
-    }
-
-    static func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
-        NSString(string: text).size(withAttributes: [.font: font]).width
-    }
-}
-
-private enum QuotaStatusImageRenderer {
-    static func render(rows: [StatusRenderRow]) -> NSImage {
-        if let row = rows.first, rows.count == 1 {
-            return renderStacked(row: row)
-        }
-
-        let valueWidth = rows.map {
-            QuotaStatusDrawing.measuredWidth($0.value, font: QuotaStatusLayout.inlineValueFont)
-        }.max() ?? 0
-        let width = ceil(
-            QuotaStatusLayout.horizontalPadding
-                + QuotaStatusLayout.inlineBadgeSize.width
-                + QuotaStatusLayout.badgeGap
-                + valueWidth
-                + QuotaStatusLayout.horizontalPadding
-        )
-        let height = NSStatusBar.system.thickness
-        let image = NSImage(size: NSSize(width: width, height: height))
-        // A template image lets macOS apply exactly the same foreground color as
-        // the other menu bar items, including wallpaper-driven light/dark changes.
-        image.isTemplate = true
-
-        image.lockFocusFlipped(true)
-        defer {
-            image.unlockFocus()
-        }
-
-        for (row, y) in zip(rows, QuotaStatusLayout.rowYOffsets(count: rows.count)) {
-            drawInlineRow(row, y: y, width: width)
-        }
-
-        return image
-    }
-
-    private static func renderStacked(row: StatusRenderRow) -> NSImage {
-        let valueWidth = QuotaStatusDrawing.measuredWidth(
-            row.value,
-            font: QuotaStatusLayout.stackedValueFont
-        )
-        let width = ceil(
-            max(QuotaStatusLayout.stackedBadgeSize.width, valueWidth)
-                + QuotaStatusLayout.horizontalPadding * 2
-        )
-        let height = NSStatusBar.system.thickness
-        let image = NSImage(size: NSSize(width: width, height: height))
-        image.isTemplate = true
-
-        image.lockFocusFlipped(true)
-        defer {
-            image.unlockFocus()
-        }
-
-        let bounds = NSRect(origin: .zero, size: image.size)
-        let badgeRect = QuotaStatusLayout.stackedBadgeRect(in: bounds)
-
-        if !row.isLow {
-            QuotaStatusDrawing.drawBadge(
-                text: row.badge,
-                in: badgeRect,
-                font: QuotaStatusLayout.stackedBadgeFont,
-                fillColor: .black,
-                textColor: .black,
-                clearsText: true
-            )
-        }
-
-        let valueBounds = NSRect(
-            x: QuotaStatusLayout.horizontalPadding,
-            y: badgeRect.maxY,
-            width: width - QuotaStatusLayout.horizontalPadding * 2,
-            height: height - badgeRect.maxY
-        )
-        QuotaStatusDrawing.drawText(
-            row.value,
-            in: valueBounds,
-            font: QuotaStatusLayout.stackedValueFont,
-            color: .black,
-            alignment: .center,
-            verticallyCentered: true
-        )
-
-        return image
-    }
-
-    private static func drawInlineRow(_ row: StatusRenderRow, y: CGFloat, width: CGFloat) {
-        let badgeRect = QuotaStatusLayout.inlineBadgeRect(rowY: y)
-
-        if !row.isLow {
-            // Clear the lettering out of the mask. The resulting template becomes
-            // a filled system-colored pill with transparent lettering.
-            QuotaStatusDrawing.drawBadge(
-                text: row.badge,
-                in: badgeRect,
-                font: QuotaStatusLayout.inlineBadgeFont,
-                fillColor: .black,
-                textColor: .black,
-                clearsText: true
-            )
-        }
-
-        let valueX = badgeRect.maxX + QuotaStatusLayout.badgeGap
-        QuotaStatusDrawing.drawText(
-            row.value,
-            in: NSRect(x: valueX, y: y, width: width - valueX, height: 10),
-            font: QuotaStatusLayout.inlineValueFont,
-            color: .black,
-            alignment: .left,
-            verticallyCentered: true
-        )
-    }
-}
-
-private final class LowQuotaStatusOverlayView: NSView {
-    var rows: [StatusRenderRow] = [] { didSet { needsDisplay = true } }
-
-    override var isFlipped: Bool { true }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-
-        if let row = rows.first, rows.count == 1, row.isLow {
-            QuotaStatusDrawing.drawBadge(
-                text: row.badge,
-                in: QuotaStatusLayout.stackedBadgeRect(in: bounds),
-                font: QuotaStatusLayout.stackedBadgeFont,
-                fillColor: .systemRed,
-                textColor: .white,
-                clearsText: false
-            )
-            return
-        }
-
-        for (row, y) in zip(rows, QuotaStatusLayout.rowYOffsets(count: rows.count)) where row.isLow {
-            QuotaStatusDrawing.drawBadge(
-                text: row.badge,
-                in: QuotaStatusLayout.inlineBadgeRect(rowY: y),
-                font: QuotaStatusLayout.inlineBadgeFont,
-                fillColor: .systemRed,
-                textColor: .white,
-                clearsText: false
-            )
-        }
     }
 }

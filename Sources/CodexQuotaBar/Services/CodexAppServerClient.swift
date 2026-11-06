@@ -5,6 +5,8 @@ import OSLog
 struct CodexAppServerClient {
     private let decoder = JSONDecoder()
 
+    static var isInstalled: Bool { (try? codexExecutableURL()) != nil }
+
     func readQuota() async throws -> QuotaSnapshot {
         try await Task.detached(priority: .userInitiated) {
             let responses: [JSONRPCResponse]

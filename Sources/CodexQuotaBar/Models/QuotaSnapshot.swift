@@ -80,7 +80,7 @@ struct QuotaSnapshot {
     }
 
     var weeklyResetLabel: String {
-        "周额度"
+        "Codex 周额度"
     }
 
     var weeklyResetValue: String {

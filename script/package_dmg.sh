@@ -33,6 +33,7 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$STAGING_DIR"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
+cp -R "$(dirname "$BUILD_BINARY")/${APP_NAME}_${APP_NAME}.bundle" "$APP_RESOURCES/"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
