@@ -2,7 +2,8 @@ import Foundation
 
 enum DailyQuotaBudget {
     /// One daily budget is 1/7 of the weekly allowance. Unused daily budgets carry
-    /// forward, so today's remainder can exceed 100% of a single daily budget.
+    /// forward, so today's remainder can exceed 100% of a single daily budget
+    /// or fall below zero when usage exceeds the budget allocated so far.
     static func remainingPercent(
         weeklyUsedPercent: Double?, resetAt: Date?, at now: Date = Date(), calendar: Calendar = .current
     ) -> Int? {
@@ -16,6 +17,6 @@ enum DailyQuotaBudget {
         // with at most seven shares released before the next weekly reset.
         let allocatedDays = min(7, daysElapsed + 1)
         let remaining = Double(allocatedDays) * 100 - min(100, used) * 7
-        return max(0, Int(remaining.rounded()))
+        return Int(remaining.rounded())
     }
 }

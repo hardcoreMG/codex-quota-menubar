@@ -21,7 +21,13 @@ final class DailyQuotaBudgetTests: XCTestCase {
         XCTAssertEqual(remaining(0, at: date(4, hour: 20)), 100)
         XCTAssertEqual(remaining(10, at: date(5, hour: 12)), 130)
         XCTAssertEqual(remaining(30, at: date(6, hour: 12)), 90)
-        XCTAssertEqual(remaining(50, at: date(6, hour: 12)), 0)
+        XCTAssertEqual(remaining(50, at: date(6, hour: 12)), -50)
+    }
+
+    func testOverspendingRemainsNegativeUntilAllocatedBudgetCatchesUp() {
+        XCTAssertEqual(remaining(50, at: date(4, hour: 20)), -250)
+        XCTAssertEqual(remaining(50, at: date(6, hour: 23, minute: 59)), -50)
+        XCTAssertEqual(remaining(50, at: date(7)), 50)
     }
 
     func testAllowanceAdvancesAtLocalMidnight() {
@@ -52,6 +58,7 @@ final class DailyQuotaBudgetTests: XCTestCase {
         XCTAssertEqual(StatusRowTint.daily(20), .normal)
         XCTAssertEqual(StatusRowTint.daily(19), .red)
         XCTAssertEqual(StatusRowTint.daily(0), .red)
+        XCTAssertEqual(StatusRowTint.daily(-50), .red)
         XCTAssertEqual(StatusRowTint.daily(nil), .normal)
     }
 
@@ -77,5 +84,17 @@ final class DailyQuotaBudgetTests: XCTestCase {
         XCTAssertEqual(QuotaStatusPresentation.codexRows(hourly).map(\.badge), ["5H"])
         XCTAssertEqual(QuotaStatusPresentation.codexRows(.empty).map(\.value), ["--", "--"])
         XCTAssertEqual(QuotaStatusPresentation.grokRows(.empty).map(\.value), ["--", "--"])
+    }
+
+    func testCodexAndGrokDisplayNegativeDailyBudgetInRed() {
+        let now = date(6, hour: 12)
+        let codex = QuotaSnapshot(weeklyUsedPercent: 50, weeklyResetAt: date(11, hour: 20))
+        let grok = GrokQuotaSnapshot(usedPercent: 50, resetAt: date(11, hour: 20))
+        let codexRows = QuotaStatusPresentation.codexRows(codex, at: now, calendar: calendar)
+        let grokRows = QuotaStatusPresentation.grokRows(grok, at: now, calendar: calendar)
+        XCTAssertEqual(codexRows, grokRows)
+        XCTAssertEqual(codexRows.map(\.value), ["-50%", "50%"])
+        XCTAssertEqual(codexRows.map(\.tint), [.red, .normal])
+        XCTAssertTrue(codexRows[0].colorsValue)
     }
 }
