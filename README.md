@@ -66,7 +66,7 @@ D = round(100 × k − 7 × min(u, 100))%
 
 ### Grok Bot
 
-已适配 Grok Bot 0.79.2 的本地 `weekly-usage.cache`（schema 2）。从以下位置读取当前账号标记和额度缓存，并检查本地登录状态：
+已适配 Grok Bot 0.79.2（schema 2）和 1.1.0（schema 3）的本地 `weekly-usage.cache`。从以下位置读取当前账号标记和额度缓存，并检查本地登录状态：
 
 ```text
 ~/Library/Application Support/Grok Bot/sand-client-persistence

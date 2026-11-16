@@ -27,6 +27,27 @@ final class GrokQuotaCacheTests: XCTestCase {
         XCTAssertEqual(snapshot.displayRow.badge, "W")
     }
 
+    func testReadsSchema3QuotaWithAdditionalPlanFields() throws {
+        var fixture = cache(percent: 7.497291440953413)
+        fixture["schemaVersion"] = 3
+        var value = fixture["value"] as! [String: Any]
+        var reading = value["reading"] as! [String: Any]
+        var usage = reading["usage"] as! [String: Any]
+        usage.merge(["hasNonZeroIncludedLimit": true, "isTeamSeat": false,
+                     "onDemand": NSNull(), "prepaidBalanceCents": 0,
+                     "grokPlanLabel": "Grok Bot Plan", "readForTeamId": NSNull()]) { _, new in new }
+        reading["usage"] = usage
+        value["reading"] = reading
+        fixture["value"] = value
+        try write(cacheKey, object: fixture)
+
+        let snapshot = try GrokQuotaCacheClient(userDataURL: root).readQuota(at: now)
+        XCTAssertEqual(snapshot.remainingPercent, 93)
+        XCTAssertEqual(snapshot.resetAt, now.addingTimeInterval(3600))
+        XCTAssertEqual(snapshot.updatedAt, now.addingTimeInterval(-60))
+        XCTAssertFalse(snapshot.isTrial)
+    }
+
     func testDoesNotUseAnotherAccountsCache() throws {
         try write(cacheKey, object: cache())
         try write(accountKey, object: ["schemaVersion": 1, "value": "other"])
@@ -56,7 +77,7 @@ final class GrokQuotaCacheTests: XCTestCase {
         try write(cacheKey, object: ["schemaVersion": 2, "value": ["kind": "absent", "expiresAtMs": 1_001_000_000]])
         XCTAssertThrowsError(try GrokQuotaCacheClient(userDataURL: root).readQuota(at: now))
         var fixture = cache()
-        fixture["schemaVersion"] = 3
+        fixture["schemaVersion"] = 4
         try write(cacheKey, object: fixture)
         XCTAssertThrowsError(try GrokQuotaCacheClient(userDataURL: root).readQuota(at: now))
     }

@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-/// Reads only Grok Bot's active-account marker and weekly quota cache (0.79.2).
+/// Reads only Grok Bot's active-account marker and weekly quota cache (schemas 2 and 3).
 /// Authentication, network requests and cache updates remain owned by Grok Bot.
 struct GrokQuotaCacheClient {
     let userDataURL: URL
@@ -30,7 +30,7 @@ struct GrokQuotaCacheClient {
             let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
             let encodedSlot = slot.addingPercentEncoding(withAllowedCharacters: allowed)!
             let cache: Envelope<WeeklyCache> = try read("sand.client.slice.account.\(encodedSlot).weekly-usage.cache")
-            guard cache.schemaVersion == 2 else { throw GrokQuotaCacheError.unsupportedFormat }
+            guard [2, 3].contains(cache.schemaVersion) else { throw GrokQuotaCacheError.unsupportedFormat }
             guard cache.value.kind == "present", let reading = cache.value.reading else {
                 throw GrokQuotaCacheError.unavailable
             }
